@@ -108,12 +108,15 @@ func (c *Conversation) processConversationSyncV2PushRound(ctx context.Context, p
 		if err != nil {
 			return err
 		}
-		pending = len(result.PendingIDs) > 0 || len(result.UnavailableIDs) > 0
+		pending = len(result.PendingIDs) > 0
 	}
 	for _, chat := range plan.Chats {
 		checkpoint, err := runtime.client.ActivateConversation(ctx, op, chat.ConversationID, caps, runtime.store)
 		if err != nil {
-			if syncv2.RecoveryFor(err) == syncv2.Unavailable || errors.Is(err, syncv2.ErrStatePending) {
+			if syncv2.RecoveryFor(err) == syncv2.Unavailable {
+				continue
+			}
+			if errors.Is(err, syncv2.ErrStatePending) {
 				pending = true
 				continue
 			}

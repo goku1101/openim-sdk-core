@@ -36,6 +36,8 @@ func TestSyncV2PushRestoresNewChatWithoutNotifyingOldHistory(t *testing.T) {
 
 func testSyncV2PushWindow(t *testing.T, upper int64) {
 	var capabilityRequests atomic.Int32
+	var deniedUnknown atomic.Bool
+	var deniedNotification atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := &pb.State{ConversationID: "si_peer_u", Known: true, StateToken: "t", MinSeq: 1, MaxSeq: upper, UnreadCount: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "si_peer_u", UserID: "peer", ConversationType: constant.SingleChatType}}
 		var data any
@@ -48,10 +50,18 @@ func testSyncV2PushWindow(t *testing.T, upper int64) {
 			var req pb.StateRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			if len(req.ConversationIDs) == 1 && req.ConversationIDs[0] == "si_denied_u" {
+				if deniedUnknown.Load() {
+					_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{{ConversationID: "si_denied_u", Known: false}}}})
+					return
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{UnavailableIDs: []string{"si_denied_u"}}})
 				return
 			}
 			if req.Notifications {
+				if deniedNotification.Load() {
+					_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{UnavailableIDs: req.ConversationIDs}})
+					return
+				}
 				response := &pb.StateResponse{}
 				if req.IncludeSelf {
 					response.States = append(response.States, &pb.State{ConversationID: "n_u_u", Known: true, StateToken: "nt", MinSeq: 1, MaxSeq: 1})
@@ -196,14 +206,21 @@ func testSyncV2PushWindow(t *testing.T, upper int64) {
 		}
 	}
 	push.Msgs["si_denied_u"] = &sdkws.PullMsgs{Msgs: []*sdkws.MsgData{{ClientMsgID: "denied", Seq: 1, SendID: "denied", ContentType: constant.Text}}}
-	push.NotificationMsgs = nil
+	deniedNotification.Store(true)
+	push.NotificationMsgs = map[string]*sdkws.PullMsgs{"n_deferred": {Msgs: []*sdkws.MsgData{{Seq: 2}}}}
 	handled, err := c.ProcessConversationSyncV2Push(ctx, push)
-	if !handled || !errors.Is(err, syncv2.ErrStatePending) || listener.changedChats != 2 {
+	if !handled || err != nil || listener.changedChats != 2 {
 		t.Fatalf("unavailable chat prevented valid chat processing: handled=%v err=%v changes=%d", handled, err, listener.changedChats)
 	}
 	if _, err = database.GetConversation(ctx, "si_denied_u"); err == nil {
 		t.Fatal("unavailable chat was activated")
 	}
+	deniedUnknown.Store(true)
+	handled, err = c.ProcessConversationSyncV2Push(ctx, &sdkws.PushMessages{Msgs: map[string]*sdkws.PullMsgs{"si_denied_u": push.Msgs["si_denied_u"]}})
+	if !handled || !errors.Is(err, syncv2.ErrStatePending) {
+		t.Fatalf("unknown state stopped retry: %v %v", handled, err)
+	}
+
 	handled, err = c.ProcessConversationSyncV2Push(ctx, &sdkws.PushMessages{NotificationMsgs: map[string]*sdkws.PullMsgs{"n_unknown": {Msgs: []*sdkws.MsgData{{Seq: 1}}}}})
 	if !handled || err == nil || capabilityRequests.Load() != 1 {
 		t.Fatalf("unknown notification did not attempt bounded rebuild: %v %v requests=%d", handled, err, capabilityRequests.Load())
