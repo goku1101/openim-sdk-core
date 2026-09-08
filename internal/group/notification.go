@@ -32,10 +32,12 @@ const (
 	groupSortIDChanged   = 1
 )
 
-func (g *Group) DoNotification(ctx context.Context, msg *sdkws.MsgData) {
-	if err := g.doNotification(ctx, msg); err != nil {
+func (g *Group) DoNotification(ctx context.Context, msg *sdkws.MsgData) error {
+	err := g.doNotification(ctx, msg)
+	if err != nil {
 		log.ZError(ctx, "DoGroupNotification failed", err)
 	}
+	return err
 }
 
 func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {

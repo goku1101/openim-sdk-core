@@ -209,3 +209,23 @@ func TestSyncV2LateSnapshotCannotReplaceNewRound(t *testing.T) {
 		t.Fatalf("new round overwritten: %+v %v", stored, err)
 	}
 }
+
+func TestSyncV2DetailsCannotRestoreStateAfterClear(t *testing.T) {
+	ctx := context.Background()
+	d, err := NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	checkpoint := &model_struct.LocalConversationSyncV2{UserID: "u", Stage: "details", SnapshotID: "s", SelectedIDs: model_struct.StringArray{"c"}}
+	if err = d.SaveConversationSyncV2(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.InvalidateConversationSyncV2Stream(ctx, "c"); err != nil {
+		t.Fatal(err)
+	}
+	resp := &pb.StateResponse{States: []*pb.State{{ConversationID: "c", Known: true, UnreadCount: 9, Conversation: &pbConversation.Conversation{OwnerUserID: "u", ConversationID: "c"}}}}
+	if err = d.ApplyConversationSyncV2Details(ctx, checkpoint, resp); err == nil {
+		t.Fatal("stale details restored after clear")
+	}
+}

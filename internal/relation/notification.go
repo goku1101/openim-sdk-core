@@ -10,10 +10,12 @@ import (
 	"github.com/openimsdk/tools/log"
 )
 
-func (r *Relation) DoNotification(ctx context.Context, msg *sdkws.MsgData) {
-	if err := r.doNotification(ctx, msg); err != nil {
+func (r *Relation) DoNotification(ctx context.Context, msg *sdkws.MsgData) error {
+	err := r.doNotification(ctx, msg)
+	if err != nil {
 		log.ZError(ctx, "doNotification error", err, "msg", msg)
 	}
+	return err
 }
 
 func (r *Relation) doNotification(ctx context.Context, msg *sdkws.MsgData) error {

@@ -148,10 +148,12 @@ func (c *Conversation) doNotificationManager(c2v common.Cmd2Value) {
 
 }
 
-func (c *Conversation) DoNotification(ctx context.Context, msg *sdkws.MsgData) {
-	if err := c.doNotification(ctx, msg); err != nil {
+func (c *Conversation) DoNotification(ctx context.Context, msg *sdkws.MsgData) error {
+	err := c.doNotification(ctx, msg)
+	if err != nil {
 		log.ZWarn(ctx, "DoConversationNotification failed", err)
 	}
+	return err
 }
 
 func (c *Conversation) doNotification(ctx context.Context, msg *sdkws.MsgData) error {

@@ -10,12 +10,13 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 )
 
-type CheckpointWriter interface {
+type RoundStore interface {
 	SaveConversationSyncV2(context.Context, *model_struct.LocalConversationSyncV2) error
+	GetConversationSyncV2Epochs(context.Context, []string) (map[string]uint64, error)
 }
 
 type DetailsStore interface {
-	CheckpointWriter
+	RoundStore
 	ApplyConversationSyncV2Details(context.Context, *model_struct.LocalConversationSyncV2, *pb.StateResponse) error
 	GetConversationSyncV2(context.Context) (*model_struct.LocalConversationSyncV2, error)
 }
@@ -52,7 +53,7 @@ type Round struct {
 	Checkpoint         *model_struct.LocalConversationSyncV2
 }
 
-func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs []string, store CheckpointWriter) (*Round, error) {
+func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs []string, store RoundStore) (*Round, error) {
 	caps, err := c.Capabilities(ctx, op, &pb.UserRequest{UserID: userID})
 	if err != nil {
 		return nil, err
@@ -93,6 +94,10 @@ func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs 
 	checkpoint.IncludeSelf = selection.IncludeSelf
 	checkpoint.VersionID, checkpoint.Version = selection.VersionID, selection.Version
 	checkpoint.Stage = "details"
+	checkpoint.StateEpochs, err = store.GetConversationSyncV2Epochs(ctx, checkpoint.SelectedIDs)
+	if err != nil {
+		return nil, err
+	}
 	if err = store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
 		return nil, err
 	}

@@ -10,11 +10,13 @@ import (
 )
 
 // DoNotification handles incoming notifications for the user.
-func (u *User) DoNotification(ctx context.Context, msg *sdkws.MsgData) {
+func (u *User) DoNotification(ctx context.Context, msg *sdkws.MsgData) error {
 	log.ZDebug(ctx, "user notification", "msg", msg)
-	if err := u.doNotification(ctx, msg); err != nil {
+	err := u.doNotification(ctx, msg)
+	if err != nil {
 		log.ZError(ctx, "DoUserNotification failed", err)
 	}
+	return err
 }
 
 func (u *User) doNotification(ctx context.Context, msg *sdkws.MsgData) error {

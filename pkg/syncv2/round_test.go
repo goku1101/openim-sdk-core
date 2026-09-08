@@ -17,6 +17,14 @@ type checkpointMemory struct {
 	saved  *model_struct.LocalConversationSyncV2
 }
 
+func (s *checkpointMemory) GetConversationSyncV2Epochs(_ context.Context, ids []string) (map[string]uint64, error) {
+	epochs := make(map[string]uint64, len(ids))
+	for _, id := range ids {
+		epochs[id] = 0
+	}
+	return epochs, nil
+}
+
 func (s *checkpointMemory) SaveConversationSyncV2(_ context.Context, v *model_struct.LocalConversationSyncV2) error {
 	copy := *v
 	s.saved = &copy

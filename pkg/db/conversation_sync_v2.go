@@ -61,7 +61,14 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 		if current.Generation != checkpoint.Generation || current.SnapshotID != checkpoint.SnapshotID || current.Stage != "details" || current.VersionID != checkpoint.VersionID || current.Version != checkpoint.Version {
 			return fmt.Errorf("sync v2: stale details round")
 		}
+		epochs, err := conversationSyncV2Epochs(tx, checkpoint.SelectedIDs)
+		if err != nil {
+			return err
+		}
 		for _, id := range checkpoint.SelectedIDs {
+			if epochs[id] != checkpoint.StateEpochs[id] {
+				return fmt.Errorf("sync v2: details invalidated by conversation event")
+			}
 			if unavailable[id] {
 				continue
 			}
