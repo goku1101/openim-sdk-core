@@ -39,3 +39,16 @@ type LocalConversationSyncV2Stream struct {
 }
 
 func (LocalConversationSyncV2Stream) TableName() string { return "local_conversation_sync_v2_streams" }
+
+// Retry work belongs to the account database. Revision prevents an in-flight
+// worker from acknowledging or postponing a newer task with the same key.
+type LocalConversationSyncV2Retry struct {
+	TaskID   string `gorm:"column:task_id;primaryKey"`
+	Kind     string `gorm:"column:kind"`
+	Payload  string `gorm:"column:payload;type:text"`
+	Revision uint64 `gorm:"column:revision"`
+	Attempts uint32 `gorm:"column:attempts"`
+	DueAt    int64  `gorm:"column:due_at;index"`
+}
+
+func (LocalConversationSyncV2Retry) TableName() string { return "local_conversation_sync_v2_retries" }

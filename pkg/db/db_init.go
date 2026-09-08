@@ -161,7 +161,7 @@ func (d *DataBase) initDB(ctx context.Context, logLevel int) error {
 	}
 	// The fork can introduce V2 while retaining the upstream SDK version string.
 	// Migrate this independent table for both fresh and existing installations.
-	if err = db.AutoMigrate(&model_struct.LocalConversationSyncV2{}, &model_struct.LocalConversationSyncV2Stream{}); err != nil {
+	if err = db.AutoMigrate(&model_struct.LocalConversationSyncV2{}, &model_struct.LocalConversationSyncV2Stream{}, &model_struct.LocalConversationSyncV2Retry{}); err != nil {
 		return err
 	}
 
