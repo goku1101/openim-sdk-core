@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
+	"github.com/openimsdk/protocol/sdkws"
 )
 
 func TestSyncV2OwnsConnectWakeupAndManualSync(t *testing.T) {
@@ -31,5 +32,37 @@ func TestSyncV2OwnsConnectWakeupAndManualSync(t *testing.T) {
 				t.Fatal("legacy sync flags emitted during V2 handling")
 			}
 		})
+	}
+}
+
+func TestSyncV2PushDoesNotFallbackAfterHandlingOrFailure(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		m := &MsgSyncer{ctx: context.Background(), conversationCh: make(chan common.Cmd2Value, 10)}
+		calls := 0
+		push := &sdkws.PushMessages{Msgs: map[string]*sdkws.PullMsgs{"c": {Msgs: []*sdkws.MsgData{{Seq: 1}}}}}
+		m.SetConversationSyncV2Push(func(ctx context.Context, got *sdkws.PushMessages) (bool, error) {
+			calls++
+			if got != push {
+				t.Error("push replaced before V2 consumer")
+			}
+			if failure {
+				return false, errors.New("V2 persistence failed")
+			}
+			return true, nil
+		})
+		// Legacy would write the absent syncedMaxSeqs map and panic.
+		m.doPushMsg(context.Background(), push)
+		if calls != 1 || len(m.conversationCh) != 0 {
+			t.Fatalf("push ownership lost: calls=%d legacy events=%d", calls, len(m.conversationCh))
+		}
+	}
+}
+
+func TestSyncV2PushExplicitLegacyPreservesTransientDelivery(t *testing.T) {
+	m := &MsgSyncer{ctx: context.Background(), conversationCh: make(chan common.Cmd2Value, 10)}
+	m.SetConversationSyncV2Push(func(context.Context, *sdkws.PushMessages) (bool, error) { return false, nil })
+	m.doPushMsg(context.Background(), &sdkws.PushMessages{Msgs: map[string]*sdkws.PullMsgs{"c": {Msgs: []*sdkws.MsgData{{Seq: 0}}}}})
+	if len(m.conversationCh) != 1 {
+		t.Fatal("explicit legacy transient event was lost")
 	}
 }
