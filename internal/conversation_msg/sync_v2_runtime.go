@@ -24,6 +24,9 @@ const (
 )
 
 type conversationSyncV2Store interface {
+	syncv2.RetryStore
+	PutConversationSyncV2Retry(context.Context, *model_struct.LocalConversationSyncV2Retry) error
+	ResumeConversationSyncV2Retries(context.Context, int64) error
 	syncv2.CoordinatorStore
 	syncv2.ActivationStore
 	GetConversationSyncV2HistoryPage(context.Context, string, int, int64, int64, string, bool) ([]*model_struct.LocalChatLog, error)
@@ -36,13 +39,16 @@ type conversationSyncV2Store interface {
 }
 
 type conversationSyncV2Runtime struct {
-	client *syncv2.Client
-	store  conversationSyncV2Store
-	mode   atomic.Int32
-	status atomic.Pointer[sdk_struct.ConversationSyncState]
-	capsMu sync.RWMutex
-	caps   *pb.Capabilities
-	runMu  sync.Mutex
+	client    *syncv2.Client
+	store     conversationSyncV2Store
+	mode      atomic.Int32
+	status    atomic.Pointer[sdk_struct.ConversationSyncState]
+	capsMu    sync.RWMutex
+	caps      *pb.Capabilities
+	runMu     sync.Mutex
+	retryMu   sync.Mutex
+	retryDone chan struct{}
+	retryWake chan struct{}
 }
 
 // ConfigureConversationSyncV2 runs once per login before connection workers.
@@ -182,6 +188,11 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		completed = true
 		runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "idle"})
 		return false, nil
+	}
+	if err = c.persistConversationSyncV2Pending(ctx, result); err != nil {
+		failState()
+		c.ConversationListener().OnSyncServerFailed(reinstalled)
+		return true, err
 	}
 	version, err := c.db.GetAppSDKVersion(ctx)
 	if err == nil {

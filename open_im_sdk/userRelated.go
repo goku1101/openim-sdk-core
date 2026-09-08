@@ -167,6 +167,7 @@ func (u *LoginMgr) MsgKvListener() open_im_sdk_callback.OnMessageKvInfoListener 
 
 func (u *LoginMgr) Exit() {
 	u.cancel()
+	u.conversation.WaitConversationSyncV2Retries()
 }
 
 func (u *LoginMgr) GetToken() string {
@@ -361,6 +362,10 @@ func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
 		u.msgSyncer.SetConversationSyncV2Push(u.conversation.ProcessConversationSyncV2Push)
 	}
 
+	if err = u.conversation.StartConversationSyncV2Retries(ctx); err != nil {
+		_ = u.db.Close(ctx)
+		return sdkerrs.ErrSdkInternal.WrapMsg("start sync v2 retries " + err.Error())
+	}
 	u.run(ctx)
 	u.setLoginStatus(Logged)
 	log.ZDebug(ctx, "login success...", "login cost time: ", time.Since(t1))

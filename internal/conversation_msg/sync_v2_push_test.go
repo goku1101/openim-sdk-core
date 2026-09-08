@@ -232,6 +232,16 @@ func testSyncV2PushWindow(t *testing.T, upper int64) {
 	if err != nil || other.ShowName != "untouched" || other.LatestMsg != "keep" {
 		t.Fatalf("activation rewrote unrelated display: %+v %v", other, err)
 	}
+	c.syncV2.status.Store(&sdk_struct.ConversationSyncState{Phase: "ready", Progress: 100})
+	previousChanges := listener.changedChats
+	payload, _ := json.Marshal(&pb.PullRequest{UserID: "u", ConversationID: "si_peer_u"})
+	if err = c.runConversationSyncV2Retry(ctx, &model_struct.LocalConversationSyncV2Retry{Kind: "reconcile", Payload: string(payload)}); err != nil {
+		t.Fatal(err)
+	}
+	if listener.changedChats != previousChanges+1 || arrivals != 1 {
+		t.Fatalf("background reconciliation failed to publish or replayed history: changes=%d arrivals=%d", listener.changedChats, arrivals)
+	}
+
 }
 
 type syncV2PushConversationListener struct {
