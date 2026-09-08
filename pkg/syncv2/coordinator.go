@@ -1,0 +1,121 @@
+package syncv2
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
+	conversation "github.com/openimsdk/protocol/conversation"
+)
+
+var ErrCatchupPending = errors.New("sync v2: metadata still introduces notification parents")
+
+type CoordinatorStore interface {
+	DetailsStore
+	MetadataStore
+	BatchStreamStore
+	GetAllConversationIDList(context.Context) ([]string, error)
+}
+
+// Hooks bind the protocol to existing SDK facilities. Publish must durably
+// refresh conversation projections before the checkpoint can become ready.
+// The caller owns start/failure/finish notifications; finish follows success.
+type CoordinatorHooks struct {
+	PrepareRelated func(context.Context) error
+	ReadMetadata   func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error)
+	Commit         CommitStream
+	Publish        func(context.Context, *model_struct.LocalConversationSyncV2) error
+}
+
+type SyncResult struct {
+	Enabled       bool
+	Checkpoint    *model_struct.LocalConversationSyncV2
+	Capabilities  *pb.Capabilities
+	Chats         *StreamResults
+	Notifications *StreamResults
+}
+
+// Synchronize performs a single negotiated round. Errors never select legacy;
+// a caller may rebuild a snapshot on the classified error, with bounded retries.
+// Pending state or storage holes remain retryable after the UI becomes ready.
+func (c *Client) Synchronize(ctx context.Context, op, userID string, store CoordinatorStore, hooks CoordinatorHooks) (*SyncResult, error) {
+	if store == nil || hooks.PrepareRelated == nil || hooks.ReadMetadata == nil || hooks.Commit == nil || hooks.Publish == nil {
+		return nil, fmt.Errorf("sync v2: incomplete coordinator dependencies")
+	}
+	loaded, err := store.GetAllConversationIDList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	round, err := c.PrepareDetails(ctx, op, userID, loaded, store)
+	if err != nil {
+		return nil, err
+	}
+	result := &SyncResult{Enabled: round.Enabled, Capabilities: round.Capabilities, Checkpoint: round.Checkpoint}
+	if !round.Enabled {
+		return result, nil
+	}
+	if err = hooks.PrepareRelated(ctx); err != nil {
+		return nil, err
+	}
+	checkpoint := round.Checkpoint
+	// The second pass also catches new notification parents and pinned chats
+	// discovered by metadata catchup. Online pushes continue after this round.
+	caughtUp := false
+	for pass := 0; pass < 3; pass++ {
+		checkedParents := make(map[string]bool, len(checkpoint.NotificationIDs))
+		for _, id := range checkpoint.NotificationIDs {
+			checkedParents[id] = true
+		}
+		result.Notifications, err = c.SyncStreams(ctx, op, &pb.StateRequest{UserID: userID, ConversationIDs: checkpoint.NotificationIDs, Notifications: true, IncludeSelf: checkpoint.IncludeSelf}, round.Capabilities, store, hooks.Commit)
+		if err != nil {
+			return nil, err
+		}
+		// A notification handler may itself have refreshed metadata in the queue.
+		// Read its committed revision instead of publishing the prepared copy.
+		checkpoint, err = store.GetConversationSyncV2(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if checkpoint.Generation != round.Checkpoint.Generation {
+			return nil, fmt.Errorf("sync v2: round superseded during notification consumption")
+		}
+		delta, err := hooks.ReadMetadata(ctx, checkpoint.Version, checkpoint.VersionID)
+		if err != nil {
+			return nil, err
+		}
+		checkpoint, err = c.ApplyMetadataDelta(ctx, op, checkpoint, delta, round.Capabilities, store)
+		if err != nil {
+			return nil, err
+		}
+		result.Chats, err = c.SyncStreams(ctx, op, &pb.StateRequest{UserID: userID, ConversationIDs: checkpoint.SelectedIDs}, round.Capabilities, store, hooks.Commit)
+		if err != nil {
+			return nil, err
+		}
+		newParents := false
+		for _, id := range checkpoint.NotificationIDs {
+			if !checkedParents[id] {
+				newParents = true
+				break
+			}
+		}
+		if pass >= 1 && !newParents {
+			caughtUp = true
+			break
+		}
+	}
+	if !caughtUp {
+		return nil, ErrCatchupPending
+	}
+	if err = hooks.Publish(ctx, checkpoint); err != nil {
+		return nil, err
+	}
+	next := *checkpoint
+	next.Stage = "ready"
+	if err = store.SaveConversationSyncV2(ctx, &next); err != nil {
+		return nil, err
+	}
+	result.Checkpoint = &next
+	return result, nil
+}

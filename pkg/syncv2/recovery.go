@@ -20,6 +20,9 @@ const (
 // RecoveryFor classifies an action, never performs retries or selects legacy
 // mode. In particular a deployment error requires a fresh capability exchange.
 func RecoveryFor(err error) Recovery {
+	if errors.Is(err, ErrCatchupPending) {
+		return Retry
+	}
 	if errors.Is(err, ErrMetadataSnapshotRequired) {
 		return RebuildSnapshot
 	}

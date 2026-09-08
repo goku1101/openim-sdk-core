@@ -80,6 +80,7 @@ var (
 )
 
 type LongConnMgr struct {
+	syncRequestGuard func(context.Context, int) error
 	//conn status mutex
 	w          sync.Mutex
 	connStatus int
@@ -163,7 +164,18 @@ func (c *LongConnMgr) Run(ctx context.Context) {
 	go c.heartbeat(ctx)
 }
 
+// SetSyncRequestGuard must be configured before Run. The V2 coordinator uses
+// this boundary to prevent history/latest/read-state paths bypassing its policy.
+func (c *LongConnMgr) SetSyncRequestGuard(guard func(context.Context, int) error) {
+	c.syncRequestGuard = guard
+}
+
 func (c *LongConnMgr) SendReqWaitResp(ctx context.Context, m proto.Message, reqIdentifier int, resp proto.Message) error {
+	if c.syncRequestGuard != nil {
+		if err := c.syncRequestGuard(ctx, reqIdentifier); err != nil {
+			return err
+		}
+	}
 	data, err := proto.Marshal(m)
 	if err != nil {
 		return sdkerrs.ErrArgs
