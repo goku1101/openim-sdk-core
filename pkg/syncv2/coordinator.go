@@ -23,6 +23,7 @@ type CoordinatorStore interface {
 // refresh conversation projections before the checkpoint can become ready.
 // The caller owns start/failure/finish notifications; finish follows success.
 type CoordinatorHooks struct {
+	Negotiated     func(context.Context, *pb.Capabilities) error
 	PrepareRelated func(context.Context) error
 	ReadMetadata   func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error)
 	Commit         CommitStream
@@ -44,11 +45,27 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	if store == nil || hooks.PrepareRelated == nil || hooks.ReadMetadata == nil || hooks.Commit == nil || hooks.Publish == nil {
 		return nil, fmt.Errorf("sync v2: incomplete coordinator dependencies")
 	}
+	caps, err := c.Capabilities(ctx, op, &pb.UserRequest{UserID: userID})
+	if err != nil {
+		return nil, err
+	}
+	if hooks.Negotiated != nil {
+		if err = hooks.Negotiated(ctx, caps); err != nil {
+			return nil, err
+		}
+	}
+	if !caps.ConversationSyncV2 {
+		return &SyncResult{Enabled: false, Capabilities: caps}, nil
+	}
 	loaded, err := store.GetAllConversationIDList(ctx)
 	if err != nil {
 		return nil, err
 	}
-	round, err := c.PrepareDetails(ctx, op, userID, loaded, store)
+	round, err := c.prepareRoundWithCapabilities(ctx, op, userID, loaded, store, caps)
+	if err != nil {
+		return nil, err
+	}
+	round, err = commitPreparedDetails(ctx, round, store)
 	if err != nil {
 		return nil, err
 	}

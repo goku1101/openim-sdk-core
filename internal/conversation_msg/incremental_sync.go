@@ -24,6 +24,9 @@ import (
 )
 
 func (c *Conversation) IncrSyncConversations(ctx context.Context) error {
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		return c.refreshConversationSyncV2Metadata(ctx)
+	}
 	conversationSyncer := syncer.VersionSynchronizer[*model_struct.LocalConversation, *pbConversation.GetIncrementalConversationResp]{
 		Ctx:       ctx,
 		DB:        c.db,

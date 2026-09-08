@@ -25,10 +25,17 @@ type DetailsStore interface {
 // checkpoint together. Message delivery and final completion remain separate.
 func (c *Client) PrepareDetails(ctx context.Context, op, userID string, loadedIDs []string, store DetailsStore) (*Round, error) {
 	round, err := c.PrepareRound(ctx, op, userID, loadedIDs, store)
-	if err != nil || !round.Enabled {
-		return round, err
+	if err != nil {
+		return nil, err
 	}
-	if err = store.ApplyConversationSyncV2Details(ctx, round.Checkpoint, round.ChatStates); err != nil {
+	return commitPreparedDetails(ctx, round, store)
+}
+
+func commitPreparedDetails(ctx context.Context, round *Round, store DetailsStore) (*Round, error) {
+	if !round.Enabled {
+		return round, nil
+	}
+	if err := store.ApplyConversationSyncV2Details(ctx, round.Checkpoint, round.ChatStates); err != nil {
 		return nil, err
 	}
 	checkpoint, err := store.GetConversationSyncV2(ctx)
@@ -58,6 +65,10 @@ func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs 
 	if err != nil {
 		return nil, err
 	}
+	return c.prepareRoundWithCapabilities(ctx, op, userID, loadedIDs, store, caps)
+}
+
+func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID string, loadedIDs []string, store RoundStore, caps *pb.Capabilities) (*Round, error) {
 	if !caps.ConversationSyncV2 {
 		return &Round{Enabled: false, Capabilities: caps}, nil
 	}
@@ -65,11 +76,11 @@ func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs 
 		return nil, fmt.Errorf("sync v2: checkpoint storage is required")
 	}
 	var generation [16]byte
-	if _, err = rand.Read(generation[:]); err != nil {
+	if _, err := rand.Read(generation[:]); err != nil {
 		return nil, err
 	}
 	checkpoint := &model_struct.LocalConversationSyncV2{UserID: userID, Generation: hex.EncodeToString(generation[:]), PolicyVersion: PolicyVersion, Stage: "snapshot", SelectedIDs: append(model_struct.StringArray(nil), loadedIDs...)}
-	if err = store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
+	if err := store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
 		return nil, err
 	}
 	selection, err := c.ReadSnapshot(ctx, op, userID, min(caps.MaxPageSize, 500))

@@ -43,6 +43,7 @@ const (
 var SearchContentType = []int{constant.Text, constant.AtText, constant.File}
 
 type Conversation struct {
+	syncV2 *conversationSyncV2Runtime
 	*interaction.LongConnMgr
 	conversationSyncer          *syncer.Syncer[*model_struct.LocalConversation, pbConversation.GetOwnerConversationResp, string]
 	db                          db_interface.DataBase

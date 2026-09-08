@@ -76,6 +76,9 @@ func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 		log.ZWarn(ctx, "conversation sync V2 failed", err)
 		return true
 	}
+	if handled {
+		m.reinstalled = false
+	}
 	return handled
 }
 

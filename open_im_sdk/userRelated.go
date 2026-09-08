@@ -356,6 +356,9 @@ func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
 	u.conversation = conv.NewConversation(ctx, u.longConnMgr, u.db, u.conversationCh, u.msgSyncerCh,
 		u.relation, u.group, u.user, u.file)
 	u.setListener(ctx)
+	if u.conversation.ConfigureConversationSyncV2(ctx) {
+		u.msgSyncer.SetConversationSyncV2(u.conversation.SynchronizeConversationV2)
+	}
 
 	u.run(ctx)
 	u.setLoginStatus(Logged)

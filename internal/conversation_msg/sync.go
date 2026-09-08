@@ -28,6 +28,9 @@ import (
 )
 
 func (c *Conversation) SyncAllConversationHashReadSeqs(ctx context.Context) error {
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		return c.refreshConversationSyncV2Metadata(ctx)
+	}
 	startTime := time.Now()
 	log.ZDebug(ctx, "start SyncConversationHashReadSeqs")
 
