@@ -52,7 +52,7 @@
 - 集成测试通过真实 Conversation 串行队列和 SQLite 验证：同一元数据版本下新增消息得到补拉；消费者失败不进入 ready；末轮新增通知父会话不会跳过；持续新增父会话时有界退出。
 - `LongConnMgr.SetSyncRequestGuard` 提供发送前的同步请求检查点，测试覆盖全量序号、全量已读、范围拉取、指定序号拉取和最新消息五个旧入口。守卫已注册到本地运行适配；目前历史/最新消息旧 WS 会被拦截，对应 V2 查询和激活入口尚未完成，暂不可提测。
 
-本地原生工具链：任务目录 `toolchain/go` 的 Go 1.24；`gomobile` / `gobind` 固定 `golang.org/x/mobile v0.0.0-20250520180527-a1d90793fc63`（其 go.mod 要求 Go 1.23），安装在相邻 `toolchain/bin`。执行时必须把这两个目录加入当前命令的 PATH；系统 PATH 没有 Go。`gomobile init` 已执行成功，但其内部会安装 `gobind@latest`；初始化后需要重新安装上述固定版本，并用 `go version -m toolchain/bin/gobind` 核验。尚未生成或接入 V2 AAR/XCFramework。
+本地原生工具链：任务目录 `toolchain/go` 的 Go 1.24；`gomobile` / `gobind` 固定 `golang.org/x/mobile v0.0.0-20250520180527-a1d90793fc63`（其 go.mod 要求 Go 1.23），安装在相邻 `toolchain/bin`。执行时必须把这两个目录加入当前命令的 PATH；系统 PATH 没有 Go。`gomobile init` 已执行成功，但其内部会安装 `gobind@latest`；初始化后需要重新安装上述固定版本，并用 `go version -m toolchain/bin/gobind` 核验。已生成本地开发用 AAR/XCFramework，尚未接入 App。
 
 ### 本地推进：登录运行适配
 
@@ -79,6 +79,14 @@ git diff --check
 - 本地历史为空时按已知边界和正反向分页游标取页；未解决缺口通过最外层历史接口保留错误和 `IsEnd=false`，不继续递归并误判结束。
 - 每次接纳状态查询都递增本地 epoch，包含服务端 token 未变化的查询；历史页与后台同步并发时拒绝旧查询覆盖，归类为重新读取状态。
 - 真实 HTTP、SQLite 和 Conversation 队列测试覆盖边界裁剪、草稿保留、缺口持久化、同 token 并发竞争、空本地页正反向分页，以及整页 unresolved 的外层回调。尚未覆盖未加载会话激活后的完整历史入口与双端 App 验收。
+
+### 本地推进：首次原生编译验证
+
+- Core 模块固定 `golang.org/x/mobile v0.0.0-20250520180527-a1d90793fc63`；其所需 x/image、x/sync、x/sys、x/text 版本和校验和一并固定。安装 gomobile/gobind 本身不足以让当前模块找到 bind 包。
+- 使用上文 Go 1.24 和固定 gomobile/gobind 编译成功：Android API 24、arm64-v8a AAR；iOS 13 及以上的 arm64 设备与 arm64/x86_64 模拟器 XCFramework。
+- AAR 的四个 ELF LOAD 段均为 `0x4000` 对齐。XCFramework 的模块名核验为 `OpenIMCore`，与 RN bridge 的 import 相同；输出文件必须命名 `OpenIMCore.xcframework`，开发标识放父目录，不能改 framework 名。
+- 开发产物在相邻 `toolchain/openim-core-dev.aar` 和 `toolchain/native-dev/OpenIMCore.xcframework`，不提交二进制、不推送远程。它们仅证明当前源码能生成原生绑定，并非可提测 App；剩余消息入口仍在开发。
+- 固定依赖后重新通过 syncv2/common 竞态测试、DB/Conversation/interaction 的 V2 竞态测试和 open_im_sdk 编译检查。
 
 ## 后续必须完成
 
