@@ -17,6 +17,7 @@ package conversation_msg
 import (
 	"context"
 	"errors"
+	"gorm.io/gorm"
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
@@ -44,56 +45,16 @@ func (c *Conversation) doRevokeMsg(ctx context.Context, msg *sdkws.MsgData) erro
 func (c *Conversation) revokeMessage(ctx context.Context, tips *sdkws.RevokeMsgTips) error {
 	revokedMsg, err := c.db.GetMessageBySeq(ctx, tips.ConversationID, tips.Seq)
 	if err != nil {
+		if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled && errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.revokeUnloadedConversationSyncV2Message(ctx, tips)
+		}
 		log.ZError(ctx, "GetMessageBySeq failed", err, "tips", &tips)
 		return errs.Wrap(err)
 	}
 
-	var revokerRole int32
-	var revokerNickname string
-	if tips.IsAdminRevoke || tips.SesstionType == constant.SingleChatType {
-		_, userName, err := c.getUserNameAndFaceURL(ctx, tips.RevokerUserID)
-		if err != nil {
-			log.ZError(ctx, "GetUserNameAndFaceURL failed", err, "tips", &tips)
-			return errs.Wrap(err)
-		} else {
-			log.ZDebug(ctx, "revoker user name", "userName", userName)
-		}
-
-		revokerNickname = userName
-	} else if tips.SesstionType == constant.ReadGroupChatType {
-		conversation, err := c.db.GetConversation(ctx, tips.ConversationID)
-		if err != nil {
-			log.ZError(ctx, "GetConversation failed", err, "conversationID", tips.ConversationID)
-			return errs.Wrap(err)
-		}
-
-		groupMember, err := c.group.GetSpecifiedGroupMembersInfo(ctx, conversation.GroupID, []string{tips.RevokerUserID})
-		if err != nil {
-			log.ZError(ctx, "GetGroupMemberInfoByGroupIDUserID failed", err, "tips", &tips)
-			return errs.Wrap(err)
-		} else {
-			log.ZDebug(ctx, "revoker member name", "groupMember", groupMember)
-			if len(groupMember) == 0 {
-				revokerNickname = "unknown"
-			} else {
-				revokerRole = groupMember[0].RoleLevel
-				revokerNickname = groupMember[0].Nickname
-			}
-		}
-	}
-	m := sdk_struct.MessageRevoked{
-		RevokerID:                   tips.RevokerUserID,
-		RevokerRole:                 revokerRole,
-		ClientMsgID:                 revokedMsg.ClientMsgID,
-		RevokerNickname:             revokerNickname,
-		RevokeTime:                  tips.RevokeTime,
-		SourceMessageSendTime:       revokedMsg.SendTime,
-		SourceMessageSendID:         revokedMsg.SendID,
-		SourceMessageSenderNickname: revokedMsg.SenderNickname,
-		SessionType:                 tips.SesstionType,
-		Seq:                         tips.Seq,
-		Ex:                          revokedMsg.Ex,
-		IsAdminRevoke:               tips.IsAdminRevoke,
+	m, err := c.messageRevocation(ctx, tips, revokedMsg)
+	if err != nil {
+		return err
 	}
 	// log.ZDebug(ctx, "callback revokeMessage", "m", m)
 	var n sdk_struct.NotificationElem
@@ -244,4 +205,56 @@ func (c *Conversation) revokeOneMessage(ctx context.Context, conversationID, cli
 		ClientMsgID:    clientMsgID,
 	})
 	return nil
+}
+
+func (c *Conversation) messageRevocation(ctx context.Context, tips *sdkws.RevokeMsgTips, revokedMsg *model_struct.LocalChatLog) (sdk_struct.MessageRevoked, error) {
+	var revokerRole int32
+	var revokerNickname string
+	if tips.IsAdminRevoke || tips.SesstionType == constant.SingleChatType {
+		_, userName, err := c.getUserNameAndFaceURL(ctx, tips.RevokerUserID)
+		if err != nil {
+			log.ZError(ctx, "GetUserNameAndFaceURL failed", err, "tips", &tips)
+			return sdk_struct.MessageRevoked{}, errs.Wrap(err)
+		} else {
+			log.ZDebug(ctx, "revoker user name", "userName", userName)
+		}
+
+		revokerNickname = userName
+	} else if tips.SesstionType == constant.ReadGroupChatType {
+		conversation, err := c.db.GetConversation(ctx, tips.ConversationID)
+		if err != nil {
+			log.ZError(ctx, "GetConversation failed", err, "conversationID", tips.ConversationID)
+			return sdk_struct.MessageRevoked{}, errs.Wrap(err)
+		}
+
+		groupMember, err := c.group.GetSpecifiedGroupMembersInfo(ctx, conversation.GroupID, []string{tips.RevokerUserID})
+		if err != nil {
+			log.ZError(ctx, "GetGroupMemberInfoByGroupIDUserID failed", err, "tips", &tips)
+			return sdk_struct.MessageRevoked{}, errs.Wrap(err)
+		} else {
+			log.ZDebug(ctx, "revoker member name", "groupMember", groupMember)
+			if len(groupMember) == 0 {
+				revokerNickname = "unknown"
+			} else {
+				revokerRole = groupMember[0].RoleLevel
+				revokerNickname = groupMember[0].Nickname
+			}
+		}
+	}
+	m := sdk_struct.MessageRevoked{
+		RevokerID:                   tips.RevokerUserID,
+		RevokerRole:                 revokerRole,
+		ClientMsgID:                 revokedMsg.ClientMsgID,
+		RevokerNickname:             revokerNickname,
+		RevokeTime:                  tips.RevokeTime,
+		SourceMessageSendTime:       revokedMsg.SendTime,
+		SourceMessageSendID:         revokedMsg.SendID,
+		SourceMessageSenderNickname: revokedMsg.SenderNickname,
+		SessionType:                 tips.SesstionType,
+		Seq:                         tips.Seq,
+		Ex:                          revokedMsg.Ex,
+		IsAdminRevoke:               tips.IsAdminRevoke,
+	}
+
+	return m, nil
 }
