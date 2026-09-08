@@ -51,6 +51,14 @@ func (c *Conversation) ConfigureConversationSyncV2(ctx context.Context) bool {
 	info := ccontext.Info(ctx)
 	runtime := &conversationSyncV2Runtime{client: syncv2.NewClient(info.ApiAddr(), info.Token(), nil), store: store}
 	c.syncV2 = runtime
+	if c.group != nil {
+		c.group.SetConversationSyncV2Invalidator(func(ctx context.Context, groupID string) error {
+			if runtime.mode.Load() == syncV2Legacy {
+				return nil
+			}
+			return store.InvalidateConversationSyncV2Stream(ctx, c.getConversationIDBySessionType(groupID, constant.ReadGroupChatType))
+		})
+	}
 	c.LongConnMgr.SetSyncRequestGuard(func(_ context.Context, identifier int) error {
 		if runtime.mode.Load() == syncV2Legacy {
 			return nil

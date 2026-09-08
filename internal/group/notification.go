@@ -98,7 +98,10 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 			if err := utils.UnmarshalNotificationElem(msg.Content, &detail); err != nil {
 				return err
 			}
-			if detail.QuitUser.UserID == g.loginUserID {
+			if detail.GetQuitUser().GetUserID() == g.loginUserID {
+				if err := g.invalidateConversationSyncV2(ctx, detail.GetGroup().GetGroupID()); err != nil {
+					return err
+				}
 				return g.IncrSyncJoinGroup(ctx)
 			} else {
 				return g.onlineSyncGroupAndMember(ctx, detail.Group.GroupID, []*sdkws.GroupMemberFullInfo{detail.QuitUser}, nil,
@@ -122,12 +125,15 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 			}
 			var self bool
 			for _, info := range detail.KickedUserList {
-				if info.UserID == g.loginUserID {
+				if info.GetUserID() == g.loginUserID {
 					self = true
 					break
 				}
 			}
 			if self {
+				if err := g.invalidateConversationSyncV2(ctx, detail.GetGroup().GetGroupID()); err != nil {
+					return err
+				}
 				return g.IncrSyncJoinGroup(ctx)
 			} else {
 				return g.onlineSyncGroupAndMember(ctx, detail.Group.GroupID, detail.KickedUserList, nil,
@@ -168,6 +174,9 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 		case constant.GroupDismissedNotification: // 1511
 			var detail sdkws.GroupDismissedTips
 			if err := utils.UnmarshalNotificationElem(msg.Content, &detail); err != nil {
+				return err
+			}
+			if err := g.invalidateConversationSyncV2(ctx, detail.GetGroup().GetGroupID()); err != nil {
 				return err
 			}
 			g.listener().OnGroupDismissed(utils.StructToJsonString(detail.Group))

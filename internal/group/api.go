@@ -73,6 +73,9 @@ func (g *Group) QuitGroup(ctx context.Context, groupID string) error {
 	if err := g.quitGroup(ctx, groupID); err != nil {
 		return err
 	}
+	if err := g.invalidateConversationSyncV2(ctx, groupID); err != nil {
+		return err
+	}
 	g.groupSyncMutex.Lock()
 	defer g.groupSyncMutex.Unlock()
 
@@ -84,6 +87,9 @@ func (g *Group) QuitGroup(ctx context.Context, groupID string) error {
 
 func (g *Group) DismissGroup(ctx context.Context, groupID string) error {
 	if err := g.dismissGroup(ctx, groupID); err != nil {
+		return err
+	}
+	if err := g.invalidateConversationSyncV2(ctx, groupID); err != nil {
 		return err
 	}
 	g.groupSyncMutex.Lock()
@@ -140,6 +146,14 @@ func (g *Group) KickGroupMember(ctx context.Context, groupID string, reason stri
 	req := &group.KickGroupMemberReq{GroupID: groupID, KickedUserIDs: userIDList, Reason: reason}
 	if err := g.kickGroupMember(ctx, req); err != nil {
 		return err
+	}
+	for _, id := range userIDList {
+		if id == g.loginUserID {
+			if err := g.invalidateConversationSyncV2(ctx, groupID); err != nil {
+				return err
+			}
+			break
+		}
 	}
 
 	g.groupSyncMutex.Lock()

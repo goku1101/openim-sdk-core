@@ -59,17 +59,18 @@ func NewGroup(loginUserID string, db db_interface.DataBase,
 }
 
 type Group struct {
-	listener           func() open_im_sdk_callback.OnGroupListener
-	loginUserID        string
-	db                 db_interface.DataBase
-	groupSyncer        *syncer.Syncer[*model_struct.LocalGroup, group.GetJoinedGroupListResp, string]
-	groupMemberSyncer  *syncer.Syncer[*model_struct.LocalGroupMember, group.GetGroupMemberListResp, [2]string]
-	conversationCh     chan common.Cmd2Value
-	groupSyncMutex     sync.Mutex
-	listenerForService open_im_sdk_callback.OnListenerForService
-	groupMemberCache   *cache.Cache[string, *model_struct.LocalGroupMember]
-	groupInfoCache     *cache.Cache[string, *model_struct.LocalGroup]
-	filter             *NotificationFilter
+	conversationSyncV2Invalidator func(context.Context, string) error
+	listener                      func() open_im_sdk_callback.OnGroupListener
+	loginUserID                   string
+	db                            db_interface.DataBase
+	groupSyncer                   *syncer.Syncer[*model_struct.LocalGroup, group.GetJoinedGroupListResp, string]
+	groupMemberSyncer             *syncer.Syncer[*model_struct.LocalGroupMember, group.GetGroupMemberListResp, [2]string]
+	conversationCh                chan common.Cmd2Value
+	groupSyncMutex                sync.Mutex
+	listenerForService            open_im_sdk_callback.OnListenerForService
+	groupMemberCache              *cache.Cache[string, *model_struct.LocalGroupMember]
+	groupInfoCache                *cache.Cache[string, *model_struct.LocalGroup]
+	filter                        *NotificationFilter
 }
 
 func (g *Group) initSyncer() {
@@ -82,6 +83,9 @@ func (g *Group) initSyncer() {
 			return nil
 		}),
 		syncer.WithDelete[*model_struct.LocalGroup, group.GetJoinedGroupListResp, string](func(ctx context.Context, value *model_struct.LocalGroup) error {
+			if err := g.invalidateConversationSyncV2(ctx, value.GroupID); err != nil {
+				return err
+			}
 			g.groupInfoCache.Delete(value.GroupID)
 			if err := g.db.DeleteGroupAllMembers(ctx, value.GroupID); err != nil {
 				return err
