@@ -30,7 +30,7 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 	if checkpoint == nil || checkpoint.UserID != d.loginUserID || checkpoint.Stage != "details" || response == nil {
 		return fmt.Errorf("sync v2: invalid details checkpoint")
 	}
-	return d.applyConversationSyncV2Details(ctx, checkpoint, checkpoint, response, nil)
+	return d.applyConversationSyncV2Details(ctx, checkpoint, checkpoint, response, nil, checkpoint.SelectedIDs)
 }
 
 // Metadata version, current details and explicit deletions commit atomically.
@@ -39,12 +39,12 @@ func (d *DataBase) ApplyConversationSyncV2Metadata(ctx context.Context, before, 
 	if before == nil || next == nil || response == nil || before.UserID != d.loginUserID || next.UserID != d.loginUserID || before.Generation != next.Generation || before.SnapshotID != next.SnapshotID || before.VersionID != next.VersionID || next.Version < before.Version || next.Stage != "messages" || before.Stage != "messages" && before.Stage != "catchup" && before.Stage != "ready" {
 		return fmt.Errorf("sync v2: invalid metadata checkpoint")
 	}
-	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted)
+	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted, next.SelectedIDs)
 }
 
-func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected, checkpoint *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted []string) error {
-	selected := make(map[string]bool, len(checkpoint.SelectedIDs))
-	for _, id := range checkpoint.SelectedIDs {
+func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected, checkpoint *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted, refreshed []string) error {
+	selected := make(map[string]bool, len(refreshed))
+	for _, id := range refreshed {
 		selected[id] = true
 	}
 	unavailable := make(map[string]bool, len(response.UnavailableIDs))
@@ -58,7 +58,21 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 	next.Stage = "messages"
 	next.Revision = expected.Revision + 1
 	next.PendingStateIDs = nil
+	retained := make(map[string]bool, len(checkpoint.SelectedIDs))
+	for _, id := range checkpoint.SelectedIDs {
+		retained[id] = true
+	}
 	next.UnavailableIDs = append(model_struct.StringArray(nil), response.UnavailableIDs...)
+	for _, id := range checkpoint.PendingStateIDs {
+		if retained[id] && !selected[id] {
+			next.PendingStateIDs = append(next.PendingStateIDs, id)
+		}
+	}
+	for _, id := range checkpoint.UnavailableIDs {
+		if retained[id] && !selected[id] {
+			next.UnavailableIDs = append(next.UnavailableIDs, id)
+		}
+	}
 	states := make(map[string]*pb.State, len(response.States))
 	for _, state := range response.States {
 		if state == nil || !selected[state.ConversationID] || unavailable[state.ConversationID] || states[state.ConversationID] != nil {
@@ -76,7 +90,7 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 		if current.Revision != expected.Revision || current.Generation != expected.Generation || current.SnapshotID != expected.SnapshotID || current.Stage != expected.Stage || current.VersionID != expected.VersionID || current.Version != expected.Version {
 			return fmt.Errorf("%w: stale details round", sdkerrs.ErrSyncV2StateChanged)
 		}
-		checkIDs := append(append([]string(nil), checkpoint.SelectedIDs...), deleted...)
+		checkIDs := append(append([]string(nil), refreshed...), deleted...)
 		epochs, err := conversationSyncV2Epochs(tx, checkIDs)
 		if err != nil {
 			return err
@@ -97,7 +111,7 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 				return err
 			}
 		}
-		for _, id := range checkpoint.SelectedIDs {
+		for _, id := range refreshed {
 			if unavailable[id] {
 				continue
 			}
@@ -123,6 +137,11 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 					return fmt.Errorf("sync v2: invalid effective bounds or unread count")
 				}
 				columns["min_seq"], columns["max_seq"], columns["unread_count"] = state.MinSeq, state.MaxSeq, state.UnreadCount
+				// A detail response may change permissions while an older message
+				// request is in flight. Retire that request in this same transaction.
+				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"epoch": gorm.Expr("epoch + 1"), "state_token": ""})}).Create(&model_struct.LocalConversationSyncV2Stream{ConversationID: id, Epoch: 1}).Error; err != nil {
+					return err
+				}
 			}
 			updates := make([]string, 0, len(columns)-1)
 			for key := range columns {

@@ -55,6 +55,21 @@ func (c *Conversation) GetAtAllTag(_ context.Context) string {
 
 func (c *Conversation) GetOneConversation(ctx context.Context, sessionType int32, sourceID string) (*model_struct.LocalConversation, error) {
 	conversationID := c.getConversationIDBySessionType(sourceID, int(sessionType))
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		checkpoint, err := c.syncV2.store.GetConversationSyncV2(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// Server-registered chats, including deferred ones, must recover their
+		// authoritative details before returning the opened conversation.
+		for _, ids := range []model_struct.StringArray{checkpoint.SelectedIDs, checkpoint.NotificationIDs} {
+			for _, id := range ids {
+				if id == conversationID {
+					return c.activateConversationSyncV2(ctx, conversationID)
+				}
+			}
+		}
+	}
 	lc, err := c.db.GetConversation(ctx, conversationID)
 	if err == nil {
 		return lc, nil

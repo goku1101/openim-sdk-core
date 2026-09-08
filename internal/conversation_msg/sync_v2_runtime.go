@@ -24,6 +24,8 @@ const (
 
 type conversationSyncV2Store interface {
 	syncv2.CoordinatorStore
+	syncv2.ActivationStore
+	InvalidateConversationSyncV2Stream(context.Context, string) error
 	CommitConversationSyncV2History(context.Context, uint64, *model_struct.LocalConversationSyncV2Stream, []*model_struct.LocalChatLog, *pb.State) error
 	GetConversationSyncV2LatestMessage(context.Context, string, int64, int64) ([]*model_struct.LocalChatLog, error)
 	ApplyConversationSyncV2Projection(context.Context, *model_struct.LocalConversationSyncV2, map[string]uint64, []*model_struct.LocalConversation) error

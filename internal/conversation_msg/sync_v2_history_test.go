@@ -5,6 +5,7 @@ package conversation_msg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -18,6 +19,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	sdk "github.com/openimsdk/openim-sdk-core/v3/pkg/sdk_params_callback"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/protocol/sdkws"
 )
@@ -140,6 +142,17 @@ func TestSyncV2HistoryEntryDoesNotInventDeletedMessagesOrFalseEnd(t *testing.T) 
 	publicResult, err = c.getAdvancedHistoryMessageList(ctx, sdk.GetAdvancedHistoryMessageListParams{ConversationID: "c", Count: 20}, false)
 	if err != nil || publicResult.ErrCode == 0 || publicResult.IsEnd {
 		t.Fatalf("empty pending page reported history end: %+v %v", publicResult, err)
+	}
+
+	beforeClear, err := database.GetConversationSyncV2Stream(ctx, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.clearConversationAndDeleteAllMsg(ctx, "c", false, database.ClearConversation); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.CommitConversationSyncV2Messages(ctx, beforeClear.Epoch, beforeClear, []*model_struct.LocalChatLog{{ClientMsgID: "late-clear", Seq: 3}}); !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+		t.Fatalf("clear allowed stale response to restore history: %v", err)
 	}
 
 }
