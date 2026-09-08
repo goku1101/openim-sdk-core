@@ -228,20 +228,31 @@ func getLostSeqListWithLimitLength(minSeq, maxSeq int64, haveSeqList []int64, is
 		return e
 	})
 
-	for i := minSeq; i <= maxSeq; i++ {
-		if _, found := haveSeqSet[i]; !found {
-			lostSeqList = append(lostSeqList, i)
-		}
+	if minSeq > maxSeq {
+		return nil
 	}
-
-	// If the lostSeqList exceeds the max limit, trim the list
-	if len(lostSeqList) > constant.PullMsgNumForReadDiffusion {
-		if isReverse {
-			// If isReverse is true, take the first constant.PullMsgNumForReadDiffusion sequences
-			return lostSeqList[:constant.PullMsgNumForReadDiffusion]
-		} else {
-			// If isReverse is false, take the last constant.PullMsgNumForReadDiffusion sequences
-			return lostSeqList[len(lostSeqList)-constant.PullMsgNumForReadDiffusion:]
+	// Walk from the requested end and stop at the page budget. Do not expand
+	// an entire sparse history range just to retain its first/last small page.
+	if isReverse {
+		for seq := minSeq; ; seq++ {
+			if _, found := haveSeqSet[seq]; !found {
+				lostSeqList = append(lostSeqList, seq)
+			}
+			if len(lostSeqList) >= constant.PullMsgNumForReadDiffusion || seq == maxSeq {
+				break
+			}
+		}
+	} else {
+		for seq := maxSeq; ; seq-- {
+			if _, found := haveSeqSet[seq]; !found {
+				lostSeqList = append(lostSeqList, seq)
+			}
+			if len(lostSeqList) >= constant.PullMsgNumForReadDiffusion || seq == minSeq {
+				break
+			}
+		}
+		for left, right := 0, len(lostSeqList)-1; left < right; left, right = left+1, right-1 {
+			lostSeqList[left], lostSeqList[right] = lostSeqList[right], lostSeqList[left]
 		}
 	}
 

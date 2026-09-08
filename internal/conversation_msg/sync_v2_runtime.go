@@ -115,8 +115,15 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 	}
 	var result *syncv2.SyncResult
 	var err error
+	// Match the legacy startup/recovery message budgets without limiting the
+	// independent notification stream or explicitly requested history pages.
+	window := int64(10)
+	if reinstalled {
+		window = 1
+	}
+	syncContext := syncv2.WithChatWindow(ctx, window)
 	for attempt := 0; attempt < 2; attempt++ {
-		result, err = runtime.client.Synchronize(ctx, ccontext.Info(ctx).OperationID(), c.loginUserID, runtime.store, hooks)
+		result, err = runtime.client.Synchronize(syncContext, ccontext.Info(ctx).OperationID(), c.loginUserID, runtime.store, hooks)
 		if err == nil {
 			break
 		}

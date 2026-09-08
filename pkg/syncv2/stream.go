@@ -137,6 +137,7 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 	}
 	for stream.ScannedSeq < upper {
 		start := max(lower, stream.ScannedSeq+1)
+		start = chatWindowStart(ctx, req.Notifications, start, upper)
 		if start > upper {
 			break
 		}
