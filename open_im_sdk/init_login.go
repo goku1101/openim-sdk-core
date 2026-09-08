@@ -116,6 +116,15 @@ func GetLoginUserID() string {
 	return UserForSDK.GetLoginUserID()
 }
 
+func GetConversationSyncState() string {
+	state := sdk_struct.ConversationSyncState{Mode: "uninitialized", Phase: "idle"}
+	if UserForSDK != nil && UserForSDK.conversation != nil {
+		state = UserForSDK.conversation.GetConversationSyncState()
+	}
+	data, _ := json.Marshal(state)
+	return string(data)
+}
+
 func (u *LoginMgr) Login(ctx context.Context, userID, token string) error {
 	return u.login(ctx, userID, token)
 }

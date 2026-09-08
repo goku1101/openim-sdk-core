@@ -66,14 +66,21 @@ func TestSyncV2RuntimeFailureNeverFinishesOrSelectsLegacy(t *testing.T) {
 				t.Fatal("native login did not configure V2")
 			}
 			handled, err := c.SynchronizeConversationV2(ctx, true)
+			state := c.GetConversationSyncState()
 			if listener.finishes != 0 {
 				t.Fatal("failed/unsupported V2 emitted success")
 			}
 			if scenario == "unsupported" {
+				if state.Mode != "legacy" || state.Phase != "idle" {
+					t.Fatalf("legacy status: %+v", state)
+				}
 				if err != nil || handled || c.syncV2.mode.Load() != syncV2Legacy || listener.starts != 0 || listener.failures != 0 {
 					t.Fatalf("explicit unsupported did not hand off cleanly: %v %v %+v", handled, err, listener)
 				}
 			} else {
+				if state.Phase != "failed" || state.Progress >= 100 {
+					t.Fatalf("failure status: %+v", state)
+				}
 				if err == nil || !handled || c.syncV2.mode.Load() == syncV2Legacy || listener.failures != 1 {
 					t.Fatalf("error fell back or hid failure: %v %v %+v", handled, err, listener)
 				}

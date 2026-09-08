@@ -14,6 +14,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
+	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 )
 
 const (
@@ -38,6 +39,7 @@ type conversationSyncV2Runtime struct {
 	client *syncv2.Client
 	store  conversationSyncV2Store
 	mode   atomic.Int32
+	status atomic.Pointer[sdk_struct.ConversationSyncState]
 	capsMu sync.RWMutex
 	caps   *pb.Capabilities
 	runMu  sync.Mutex
@@ -81,6 +83,18 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 	}
 	runtime.runMu.Lock()
 	defer runtime.runMu.Unlock()
+	completed := false
+	runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "syncing", Progress: 1})
+	failState := func() {
+		state := c.GetConversationSyncState()
+		state.Phase = "failed"
+		runtime.status.Store(&state)
+	}
+	defer func() {
+		if !completed {
+			failState()
+		}
+	}()
 	if ccontext.Info(ctx).OperationID() == "" {
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
@@ -90,6 +104,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		Progress: func(value int) {
 			if ctx.Err() == nil && value > lastProgress && value < 100 {
 				lastProgress = value
+				runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "syncing", Progress: value})
 				c.ConversationListener().OnSyncServerProgress(value)
 			}
 		},
@@ -157,12 +172,15 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		}
 	}
 	if err != nil {
+		failState()
 		if ctx.Err() == nil {
 			c.ConversationListener().OnSyncServerFailed(reinstalled)
 		}
 		return true, err
 	}
 	if !result.Enabled {
+		completed = true
+		runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "idle"})
 		return false, nil
 	}
 	version, err := c.db.GetAppSDKVersion(ctx)
@@ -171,11 +189,13 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		err = c.db.SetAppSDKVersion(ctx, version)
 	}
 	if err != nil {
+		failState()
 		c.ConversationListener().OnSyncServerFailed(reinstalled)
 		return true, err
 	}
 	total, err := c.db.GetTotalUnreadMsgCountDB(ctx)
 	if err != nil {
+		failState()
 		c.ConversationListener().OnSyncServerFailed(reinstalled)
 		return true, err
 	}
@@ -183,6 +203,8 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		return true, err
 	}
 	c.ConversationListener().OnTotalUnreadMessageCountChanged(total)
+	completed = true
+	runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "ready", Progress: 100})
 	c.ConversationListener().OnSyncServerProgress(100)
 	c.ConversationListener().OnSyncServerFinish(reinstalled)
 	return true, nil
