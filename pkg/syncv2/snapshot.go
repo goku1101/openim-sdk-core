@@ -12,6 +12,7 @@ import (
 // Selection is published only after both scopes have been read completely.
 // Version is the pre-scan metadata version, not a message/read event watermark.
 type Selection struct {
+	SnapshotID      string
 	ChatIDs         []string
 	NotificationIDs []string
 	IncludeSelf     bool
@@ -56,6 +57,7 @@ func (c *Client) ReadSnapshot(ctx context.Context, op, userID string, pageSize i
 			}
 			if snapshotID == "" {
 				snapshotID = page.SnapshotID
+				result.SnapshotID = snapshotID
 				result.VersionID, result.Version, result.Mode = page.VersionID, page.Version, page.Mode
 			}
 			if snapshotID == "" || page.SnapshotID != snapshotID || page.Scope != scope || page.PolicyVersion != PolicyVersion || page.VersionID != result.VersionID || page.Version != result.Version || page.Mode != result.Mode || (page.Mode != "full" && page.Mode != "filtered") {

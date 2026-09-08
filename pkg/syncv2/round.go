@@ -2,6 +2,8 @@ package syncv2
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
@@ -10,6 +12,33 @@ import (
 
 type CheckpointWriter interface {
 	SaveConversationSyncV2(context.Context, *model_struct.LocalConversationSyncV2) error
+}
+
+type DetailsStore interface {
+	CheckpointWriter
+	ApplyConversationSyncV2Details(context.Context, *model_struct.LocalConversationSyncV2, *pb.StateResponse) error
+	GetConversationSyncV2(context.Context) (*model_struct.LocalConversationSyncV2, error)
+}
+
+// PrepareDetails advances only after the database commits the details and
+// checkpoint together. Message delivery and final completion remain separate.
+func (c *Client) PrepareDetails(ctx context.Context, op, userID string, loadedIDs []string, store DetailsStore) (*Round, error) {
+	round, err := c.PrepareRound(ctx, op, userID, loadedIDs, store)
+	if err != nil || !round.Enabled {
+		return round, err
+	}
+	if err = store.ApplyConversationSyncV2Details(ctx, round.Checkpoint, round.ChatStates); err != nil {
+		return nil, err
+	}
+	checkpoint, err := store.GetConversationSyncV2(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if checkpoint.Generation != round.Checkpoint.Generation || checkpoint.SnapshotID != round.Selection.SnapshotID || checkpoint.Stage != "messages" {
+		return nil, fmt.Errorf("sync v2: details round superseded")
+	}
+	round.Checkpoint = checkpoint
+	return round, nil
 }
 
 // Round contains network results awaiting the conversation/message consumers.
@@ -34,7 +63,11 @@ func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs 
 	if store == nil {
 		return nil, fmt.Errorf("sync v2: checkpoint storage is required")
 	}
-	checkpoint := &model_struct.LocalConversationSyncV2{UserID: userID, PolicyVersion: PolicyVersion, Stage: "snapshot", SelectedIDs: append(model_struct.StringArray(nil), loadedIDs...)}
+	var generation [16]byte
+	if _, err = rand.Read(generation[:]); err != nil {
+		return nil, err
+	}
+	checkpoint := &model_struct.LocalConversationSyncV2{UserID: userID, Generation: hex.EncodeToString(generation[:]), PolicyVersion: PolicyVersion, Stage: "snapshot", SelectedIDs: append(model_struct.StringArray(nil), loadedIDs...)}
 	if err = store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
 		return nil, err
 	}
@@ -55,6 +88,7 @@ func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs 
 		}
 	}
 	checkpoint.SelectedIDs = selection.ChatIDs
+	checkpoint.SnapshotID = selection.SnapshotID
 	checkpoint.NotificationIDs = selection.NotificationIDs
 	checkpoint.IncludeSelf = selection.IncludeSelf
 	checkpoint.VersionID, checkpoint.Version = selection.VersionID, selection.Version
