@@ -29,6 +29,7 @@ import (
 
 	"github.com/openimsdk/protocol/sdkws"
 	"github.com/openimsdk/tools/log"
+	"gorm.io/gorm"
 )
 
 func (c *Conversation) getConversationMaxSeqAndSetHasRead(ctx context.Context, conversationID string) error {
@@ -237,6 +238,9 @@ func (c *Conversation) doReadDrawing(ctx context.Context, msg *sdkws.MsgData) er
 	}
 	conversation, err := c.db.GetConversation(ctx, tips.ConversationID)
 	if err != nil {
+		if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled && errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
 		log.ZWarn(ctx, "GetConversation err", err, "conversationID", tips.ConversationID)
 		return err
 
@@ -245,17 +249,27 @@ func (c *Conversation) doReadDrawing(ctx context.Context, msg *sdkws.MsgData) er
 		if len(tips.Seqs) == 0 {
 			return errs.New("tips Seqs is empty").Wrap()
 		}
-		messages, err := c.db.GetMessagesBySeqs(ctx, tips.ConversationID, tips.Seqs)
+		var messages []*model_struct.LocalChatLog
+		if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+			messages, err = c.syncV2.store.GetConversationSyncV2LocalReadMessages(ctx, tips.ConversationID, tips.Seqs)
+		} else {
+			messages, err = c.db.GetMessagesBySeqs(ctx, tips.ConversationID, tips.Seqs)
+		}
 		if err != nil {
 			log.ZWarn(ctx, "GetMessagesBySeqs err", err, "conversationID", tips.ConversationID, "seqs", tips.Seqs)
 			return err
 
 		}
+		if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled && len(messages) == 0 {
+			return nil
+		}
 		if conversation.ConversationType == constant.SingleChatType {
 			latestMsg := &sdk_struct.MsgStruct{}
-			if err := json.Unmarshal([]byte(conversation.LatestMsg), latestMsg); err != nil {
-				log.ZWarn(ctx, "Unmarshal err", err, "conversationID", tips.ConversationID, "latestMsg", conversation.LatestMsg)
-				return err
+			if conversation.LatestMsg != "" || c.syncV2 == nil || c.syncV2.mode.Load() != syncV2Enabled {
+				if err := json.Unmarshal([]byte(conversation.LatestMsg), latestMsg); err != nil {
+					log.ZWarn(ctx, "Unmarshal err", err, "conversationID", tips.ConversationID, "latestMsg", conversation.LatestMsg)
+					return err
+				}
 			}
 			var successMsgIDs []string
 			for _, message := range messages {

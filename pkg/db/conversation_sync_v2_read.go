@@ -55,3 +55,20 @@ func (d *DataBase) MarkConversationSyncV2LocalRead(ctx context.Context, id strin
 		return nil
 	})
 }
+
+// Unlike legacy history reads, a receipt must not require creating a chat table.
+func (d *DataBase) GetConversationSyncV2LocalReadMessages(ctx context.Context, id string, seqs []int64) ([]*model_struct.LocalChatLog, error) {
+	d.mRWMutex.RLock()
+	defer d.mRWMutex.RUnlock()
+	var count int64
+	table := utils.GetConversationTableName(id)
+	if err := d.conn.WithContext(ctx).Raw("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count).Error; err != nil {
+		return nil, err
+	}
+	if count == 0 || len(seqs) == 0 {
+		return nil, nil
+	}
+	var rows []*model_struct.LocalChatLog
+	err := d.conn.WithContext(ctx).Table(table).Where("seq IN ?", seqs).Order("send_time DESC").Find(&rows).Error
+	return rows, err
+}

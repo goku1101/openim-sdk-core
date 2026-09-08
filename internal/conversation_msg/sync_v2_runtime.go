@@ -24,6 +24,7 @@ const (
 )
 
 type conversationSyncV2Store interface {
+	GetConversationSyncV2LocalReadMessages(context.Context, string, []int64) ([]*model_struct.LocalChatLog, error)
 	MarkConversationSyncV2LocalRead(context.Context, string, []int64) error
 	syncv2.RetryStore
 	UpdateConversationSyncV2RetryPayload(context.Context, *model_struct.LocalConversationSyncV2Retry, string) error

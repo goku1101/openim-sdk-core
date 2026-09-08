@@ -5,6 +5,7 @@ package conversation_msg
 import (
 	"context"
 	"encoding/json"
+	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
@@ -62,5 +63,55 @@ func TestSyncV2SelfReadDoesNotRequireDownloadedMessage(t *testing.T) {
 	d.Close(ctx)
 	if err = c.doReadDrawing(ctx, msg); err == nil {
 		t.Fatal("database failure hidden")
+	}
+}
+
+type syncV2ReadListener struct {
+	open_im_sdk_callback.OnAdvancedMsgListener
+	receipts int
+}
+
+func (l *syncV2ReadListener) OnRecvC2CReadReceipt(string) { l.receipts++ }
+func TestSyncV2PeerReadBeforeLatestMessageProjection(t *testing.T) {
+	ctx := context.Background()
+	d, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	l := &syncV2ReadListener{}
+	c := &Conversation{db: d, loginUserID: "u", syncV2: &conversationSyncV2Runtime{store: d}, msgListener: func() open_im_sdk_callback.OnAdvancedMsgListener { return l }}
+	c.syncV2.mode.Store(syncV2Enabled)
+	tips := &sdkws.MarkAsReadTips{ConversationID: "si_u_v", MarkAsReadUserID: "v", Seqs: []int64{7}}
+	body, _ := json.Marshal(tips)
+	content, _ := json.Marshal(&sdkws.NotificationElem{Detail: string(body)})
+	msg := &sdkws.MsgData{Content: content, SendTime: 123}
+	if err = d.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: tips.ConversationID, ConversationType: constant.SingleChatType}); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.doReadDrawing(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	if l.receipts != 0 {
+		t.Fatal("empty receipt emitted")
+	}
+	if err = d.BatchInsertMessageList(ctx, tips.ConversationID, []*model_struct.LocalChatLog{{ClientMsgID: "sent", Seq: 7, SendID: "u"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.doReadDrawing(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	row, err := d.GetMessageBySeq(ctx, tips.ConversationID, 7)
+	if err != nil || !row.IsRead || l.receipts != 1 {
+		t.Fatalf("receipt not applied: %+v %v %d", row, err, l.receipts)
+	}
+	tips.ConversationID = "si_u_unloaded"
+	body, _ = json.Marshal(tips)
+	msg.Content, _ = json.Marshal(&sdkws.NotificationElem{Detail: string(body)})
+	if err = c.doReadDrawing(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	if l.receipts != 1 {
+		t.Fatal("invented receipt for unloaded chat")
 	}
 }
