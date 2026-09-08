@@ -130,7 +130,13 @@ func (c *Conversation) processConversationSyncV2PushRound(ctx context.Context, p
 			newChats[chat.ConversationID] = notifyIDs
 		}
 		notifyIDs = newChats[chat.ConversationID]
-		stream, err := runtime.client.SyncStream(ctx, op, &pb.PullRequest{UserID: c.loginUserID, ConversationID: chat.ConversationID}, caps, runtime.store, func(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
+		var required []int64
+		for _, message := range push.Msgs[chat.ConversationID].Msgs {
+			if message.Seq > 0 {
+				required = append(required, message.Seq)
+			}
+		}
+		stream, err := runtime.client.SyncStream(syncv2.WithChatWindow(ctx, 10), op, &pb.PullRequest{UserID: c.loginUserID, ConversationID: chat.ConversationID, Seqs: required}, caps, runtime.store, func(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
 			return c.consumeConversationSyncV2LiveSelected(ctx, progress, messages, notifyIDs)
 		})
 		if err != nil {

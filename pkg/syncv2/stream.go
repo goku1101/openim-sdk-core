@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
@@ -48,8 +49,13 @@ func (c *Client) SyncStream(ctx context.Context, op string, req *pb.PullRequest,
 	if err != nil {
 		return nil, err
 	}
-	if caps == nil || caps.MaxBatchSize <= 0 || caps.MaxRequestBytes <= 0 || store == nil || commit == nil || len(req.Seqs) != 0 {
+	if caps == nil || caps.MaxBatchSize <= 0 || caps.MaxRequestBytes <= 0 || store == nil || commit == nil || req.Notifications && len(req.Seqs) != 0 {
 		return nil, fmt.Errorf("sync v2: invalid stream scan")
+	}
+	for _, seq := range req.Seqs {
+		if seq <= 0 {
+			return nil, fmt.Errorf("sync v2: invalid pushed sequence")
+		}
 	}
 	before, err := store.GetConversationSyncV2Stream(ctx, id)
 	if err != nil {
@@ -101,13 +107,20 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 	}
 	lower := max(int64(1), state.MinSeq)
 	batchSize := min(int(caps.MaxBatchSize), 500)
+	attempted := make(map[int64]bool)
 	pull := func(seqs []int64, scanned int64) error {
-		result, err := c.PullBatched(ctx, op, &pb.PullRequest{UserID: req.UserID, ConversationID: req.ConversationID, Notifications: req.Notifications, Self: req.Self, StateToken: stream.StateToken, Seqs: seqs}, caps)
-		if err != nil {
-			return err
-		}
-		if err := validatePullOutcomes(seqs, result); err != nil {
-			return err
+		result := new(pb.PullResponse)
+		if len(seqs) > 0 {
+			result, err = c.PullBatched(ctx, op, &pb.PullRequest{UserID: req.UserID, ConversationID: req.ConversationID, Notifications: req.Notifications, Self: req.Self, StateToken: stream.StateToken, Seqs: seqs}, caps)
+			if err != nil {
+				return err
+			}
+			if err = validatePullOutcomes(seqs, result); err != nil {
+				return err
+			}
+			for _, seq := range seqs {
+				attempted[seq] = true
+			}
 		}
 		progress := *stream
 		progress.ScannedSeq = scanned
@@ -124,6 +137,29 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 		}
 		return nil
 	}
+	// A push may arrive before the state endpoint confirms its tail. Preserve
+	// those allowed sequences for a later round instead of acknowledging loss.
+	waiting := *stream
+	waiting.PendingSeqs = append([]int64(nil), stream.PendingSeqs...)
+	deferred := false
+	for _, seq := range req.Seqs {
+		if seq > upper && seq >= lower && (state.PermissionMaxSeq == 0 || seq <= state.PermissionMaxSeq) {
+			waiting.PendingSeqs = append(waiting.PendingSeqs, seq)
+			deferred = true
+		}
+	}
+	if deferred {
+		if err = commit(ctx, &waiting, nil); err != nil {
+			return nil, err
+		}
+		stream, err = store.GetConversationSyncV2Stream(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if stream.Epoch != waiting.Epoch || stream.StateToken != waiting.StateToken {
+			return nil, ErrStatePending
+		}
+	}
 	var pending []int64
 	for _, seq := range stream.PendingSeqs {
 		if seq >= lower && seq <= upper {
@@ -135,6 +171,27 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 			return nil, err
 		}
 	}
+	// Explicit push sequences outside the recent window still require durable
+	// delivery. Do not replay historical ranges merely to reach those sequences.
+	hasNew := stream.ScannedSeq < upper
+	nextStart := lower
+	if hasNew {
+		nextStart = chatWindowStart(ctx, req.Notifications, max(lower, stream.ScannedSeq+1), upper)
+	}
+	var required []int64
+	seen := make(map[int64]bool, len(req.Seqs))
+	for _, seq := range req.Seqs {
+		if seq >= lower && seq <= upper && (!hasNew || seq < nextStart) && !attempted[seq] && !seen[seq] {
+			required = append(required, seq)
+			seen[seq] = true
+		}
+	}
+	sort.Slice(required, func(i, j int) bool { return required[i] < required[j] })
+	for start := 0; start < len(required); start += batchSize {
+		if err = pull(required[start:min(start+batchSize, len(required))], stream.ScannedSeq); err != nil {
+			return nil, err
+		}
+	}
 	for stream.ScannedSeq < upper {
 		start := max(lower, stream.ScannedSeq+1)
 		start = chatWindowStart(ctx, req.Notifications, start, upper)
@@ -142,9 +199,14 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 			break
 		}
 		end := start + min(int64(batchSize-1), upper-start)
-		seqs := make([]int64, int(end-start+1))
-		for i := range seqs {
-			seqs[i] = start + int64(i)
+		seqs := make([]int64, 0, int(end-start+1))
+		for seq := start; ; seq++ {
+			if !attempted[seq] {
+				seqs = append(seqs, seq)
+			}
+			if seq == end {
+				break
+			}
 		}
 		if err = pull(seqs, end); err != nil {
 			return nil, err

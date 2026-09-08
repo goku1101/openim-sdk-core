@@ -29,9 +29,15 @@ import (
 )
 
 func TestSyncV2PushRestoresNewChatWithoutNotifyingOldHistory(t *testing.T) {
+	for _, upper := range []int64{3, 1000000} {
+		t.Run(fmt.Sprint(upper), func(t *testing.T) { testSyncV2PushWindow(t, upper) })
+	}
+}
+
+func testSyncV2PushWindow(t *testing.T, upper int64) {
 	var capabilityRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		state := &pb.State{ConversationID: "si_peer_u", Known: true, StateToken: "t", MinSeq: 1, MaxSeq: 3, UnreadCount: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "si_peer_u", UserID: "peer", ConversationType: constant.SingleChatType}}
+		state := &pb.State{ConversationID: "si_peer_u", Known: true, StateToken: "t", MinSeq: 1, MaxSeq: upper, UnreadCount: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "si_peer_u", UserID: "peer", ConversationType: constant.SingleChatType}}
 		var data any
 		switch r.URL.Path {
 		case "/conversation/sync_capabilities":
@@ -83,6 +89,11 @@ func TestSyncV2PushRestoresNewChatWithoutNotifyingOldHistory(t *testing.T) {
 			}
 			response := &pb.PullResponse{State: state}
 			for _, seq := range req.Seqs {
+				if seq != 3 && seq < max(int64(1), upper-9) {
+					t.Errorf("push downloaded unrelated old history: %d", seq)
+					w.WriteHeader(500)
+					return
+				}
 				response.Messages = append(response.Messages, &sdkws.MsgData{ClientMsgID: fmt.Sprintf("m%d", seq), Seq: seq, SendID: "peer", RecvID: "u", SessionType: constant.SingleChatType, ContentType: constant.Text, SendTime: seq, Content: []byte(`{"content":"stored"}`)})
 			}
 			data = response
@@ -159,10 +170,14 @@ func TestSyncV2PushRestoresNewChatWithoutNotifyingOldHistory(t *testing.T) {
 		t.Fatalf("wrong push callbacks: messages=%d new=%d changed=%d", arrivals, listener.newChats, listener.changedChats)
 	}
 	got, err := database.GetConversation(ctx, "si_peer_u")
-	if err != nil || got.UnreadCount != 2 || got.LatestMsgSendTime != 3 || got.ShowName != "Remark" {
+	if err != nil || got.UnreadCount != 2 || got.LatestMsgSendTime != upper || got.ShowName != "Remark" {
 		t.Fatalf("push projection incomplete: %+v %v", got, err)
 	}
-	for seq := int64(1); seq <= 3; seq++ {
+	expected := []int64{3}
+	for seq := max(int64(1), upper-9); seq <= upper; seq++ {
+		expected = append(expected, seq)
+	}
+	for _, seq := range expected {
 		if _, err = database.GetMessageBySeq(ctx, "si_peer_u", seq); err != nil {
 			t.Fatalf("history not persisted: %d %v", seq, err)
 		}

@@ -22,10 +22,14 @@ func TestChatWindowBoundsTrafficWithoutDroppingPendingOrNotifications(t *testing
 		name                   string
 		window, upper          int64
 		notifications, pending bool
+		requested              []int64
+		expectedPending        []int64
 	}{
-		{"fresh", 1, 1000000, false, false},
-		{"restore-with-hole", 10, 1000000, false, true},
-		{"notifications", 1, 30, true, false},
+		{"fresh", 1, 1000000, false, false, nil, nil},
+		{"restore-with-hole", 10, 1000000, false, true, nil, nil},
+		{"notifications", 1, 30, true, false, nil, nil},
+		{"explicit-push", 10, 1000000, false, true, []int64{7, 5, 7, 1000000}, nil},
+		{"unconfirmed-tail", 1, 1000000, false, false, []int64{1000001}, []int64{1000001}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := syncv2.WithChatWindow(context.Background(), tc.window)
@@ -55,7 +59,7 @@ func TestChatWindowBoundsTrafficWithoutDroppingPendingOrNotifications(t *testing
 					_ = json.NewDecoder(r.Body).Decode(&req)
 					if !tc.notifications {
 						for _, seq := range req.Seqs {
-							if seq != 5 && seq < tc.upper-tc.window+1 {
+							if seq != 5 && seq != 7 && seq < tc.upper-tc.window+1 {
 								t.Errorf("unbounded history request: %v", req.Seqs)
 								w.WriteHeader(500)
 								return
@@ -77,7 +81,7 @@ func TestChatWindowBoundsTrafficWithoutDroppingPendingOrNotifications(t *testing
 			}))
 			defer server.Close()
 			client := syncv2.NewClient(server.URL, "", server.Client())
-			stream, err := client.SyncStream(ctx, "op", &pb.PullRequest{UserID: "u", ConversationID: "sg_c", Notifications: tc.notifications}, &pb.Capabilities{MaxBatchSize: 4, MaxRequestBytes: 65536}, database, func(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
+			commit := func(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
 				var rows []*model_struct.LocalChatLog
 				var seqs []int64
 				for _, m := range messages {
@@ -88,13 +92,19 @@ func TestChatWindowBoundsTrafficWithoutDroppingPendingOrNotifications(t *testing
 					return database.CommitConversationSyncV2Notifications(ctx, progress.Epoch, progress, seqs)
 				}
 				return database.CommitConversationSyncV2Messages(ctx, progress.Epoch, progress, rows)
-			})
+			}
+			caps := &pb.Capabilities{MaxBatchSize: 4, MaxRequestBytes: 65536}
+			request := &pb.PullRequest{UserID: "u", ConversationID: "sg_c", Notifications: tc.notifications, Seqs: tc.requested}
+			stream, err := client.SyncStream(ctx, "op", request, caps, database, commit)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var want []int64
 			if tc.pending {
 				want = append(want, 5)
+			}
+			if tc.name == "explicit-push" {
+				want = append(want, 7)
 			}
 			lower := tc.upper - tc.window + 1
 			if tc.notifications {
@@ -103,8 +113,19 @@ func TestChatWindowBoundsTrafficWithoutDroppingPendingOrNotifications(t *testing
 			for seq := lower; seq <= tc.upper; seq++ {
 				want = append(want, seq)
 			}
-			if !reflect.DeepEqual(got, want) || stream.ScannedSeq != tc.upper || len(stream.PendingSeqs) != 0 {
+			if !reflect.DeepEqual(got, want) || stream.ScannedSeq != tc.upper || !reflect.DeepEqual(stream.PendingSeqs, tc.expectedPending) {
 				t.Fatalf("window/progress incorrect: requests=%v stream=%+v", got, stream)
+			}
+			if tc.name == "unconfirmed-tail" {
+				// The next state query catches up. Retry the durable hole once,
+				// even though it now also lies in the newly scanned window.
+				tc.upper++
+				got = nil
+				request.Seqs = nil
+				stream, err = client.SyncStream(ctx, "retry", request, caps, database, commit)
+				if err != nil || !reflect.DeepEqual(got, []int64{tc.upper}) || len(stream.PendingSeqs) != 0 || stream.ScannedSeq != tc.upper {
+					t.Fatalf("tail retry lost or duplicated: requests=%v stream=%+v err=%v", got, stream, err)
+				}
 			}
 			if !tc.notifications {
 				if _, err = database.GetMessageBySeq(ctx, id, tc.upper-100); err == nil {
