@@ -203,3 +203,23 @@ func TestSyncV2NotificationAdoptsLegacyCursorOnlyOnce(t *testing.T) {
 		t.Fatalf("legacy cursor adopted twice: %+v %v", accepted, err)
 	}
 }
+
+func TestSyncV2SameBoundaryConcurrentQueriesCannotShareEpoch(t *testing.T) {
+	ctx := context.Background()
+	d, err := NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	state := &model_struct.LocalConversationSyncV2Stream{ConversationID: "c", StateToken: "same-boundary", MinSeq: 1}
+	initial, err := d.AcceptConversationSyncV2State(ctx, 0, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.AcceptConversationSyncV2State(ctx, initial.Epoch, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.AcceptConversationSyncV2State(ctx, initial.Epoch, state); err == nil {
+		t.Fatal("concurrent history and sync accepted the same stale query epoch")
+	}
+}

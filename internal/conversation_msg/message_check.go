@@ -81,6 +81,49 @@ func (c *Conversation) validateAndFillEndBlockContinuity(ctx context.Context, co
 }
 func (c *Conversation) checkEndBlock(ctx context.Context, conversationID string, isReverse bool, viewType, count int,
 	list *[]*model_struct.LocalChatLog, messageListCallback *sdk.GetAdvancedHistoryMessageListCallback) (isShouldFetchMessage bool, seqList []int64) {
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy && messageListCallback.ErrCode != 0 {
+		messageListCallback.IsEnd = false
+		return false, nil
+	}
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy && len(*list) == 0 && count > 0 {
+		conversation, err := c.db.GetConversation(ctx, conversationID)
+		if err != nil {
+			messageListCallback.ErrCode = 100
+			messageListCallback.ErrMsg = err.Error()
+			messageListCallback.IsEnd = false
+			return false, nil
+		}
+		lower, upper := max(int64(1), conversation.MinSeq), conversation.MaxSeq
+		if isReverse {
+			if last, ok := c.messagePullReverseEndSeqMap.Load(conversationID, viewType); ok && last > 0 {
+				if last >= upper {
+					messageListCallback.IsEnd = true
+					return false, nil
+				}
+				lower = max(lower, last+1)
+			}
+			upper = lower + min(int64(count-1), max(int64(0), upper-lower))
+		} else {
+			if last, ok := c.messagePullForwardEndSeqMap.Load(conversationID, viewType); ok && last > 0 {
+				if last <= lower {
+					messageListCallback.IsEnd = true
+					return false, nil
+				}
+				upper = min(upper, last-1)
+			}
+			lower = max(lower, upper-int64(count-1))
+		}
+		if upper < lower || conversation.MaxSeq < max(int64(1), conversation.MinSeq) {
+			messageListCallback.IsEnd = true
+			return false, nil
+		}
+		seqs := make([]int64, int(upper-lower+1))
+		for i := range seqs {
+			seqs[i] = lower + int64(i)
+		}
+		messageListCallback.IsEnd = false
+		return true, seqs
+	}
 	// Perform an end-of-block check if the retrieved message count is less than requested
 	if len(*list) < count {
 		if isReverse {
@@ -215,6 +258,10 @@ func (c *Conversation) fetchAndMergeMissingMessages(ctx context.Context, convers
 	isReverse bool, count int, startTime int64, list *[]*model_struct.LocalChatLog,
 	messageListCallback *sdk.GetAdvancedHistoryMessageListCallback) {
 
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		c.fetchConversationSyncV2History(ctx, conversationID, seqList, isReverse, count, list, messageListCallback)
+		return
+	}
 	var getSeqMessageResp msg.GetSeqMessageResp
 	var getSeqMessageReq msg.GetSeqMessageReq
 	getSeqMessageReq.UserID = c.loginUserID

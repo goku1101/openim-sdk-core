@@ -8,6 +8,7 @@ import (
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"gorm.io/gorm"
 )
@@ -51,7 +52,7 @@ func (d *DataBase) ApplyConversationSyncV2Projection(ctx context.Context, checkp
 			return err
 		}
 		if current.Generation != checkpoint.Generation || current.Revision != checkpoint.Revision || current.Stage != "messages" {
-			return fmt.Errorf("sync v2: stale projection revision")
+			return fmt.Errorf("%w: stale projection revision", sdkerrs.ErrSyncV2StateChanged)
 		}
 		epochs, err := conversationSyncV2Epochs(tx, ids)
 		if err != nil {
@@ -60,7 +61,7 @@ func (d *DataBase) ApplyConversationSyncV2Projection(ctx context.Context, checkp
 		for _, conversation := range conversations {
 			expected, ok := expectedEpochs[conversation.ConversationID]
 			if !ok || epochs[conversation.ConversationID] != expected {
-				return fmt.Errorf("sync v2: invalidated projection")
+				return fmt.Errorf("%w: invalidated projection", sdkerrs.ErrSyncV2StateChanged)
 			}
 			result := tx.Model(&model_struct.LocalConversation{}).Where("conversation_id = ?", conversation.ConversationID).Updates(map[string]interface{}{"show_name": conversation.ShowName, "face_url": conversation.FaceURL, "latest_msg": conversation.LatestMsg, "latest_msg_send_time": conversation.LatestMsgSendTime})
 			if result.Error != nil {

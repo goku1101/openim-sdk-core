@@ -6,10 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -39,8 +42,9 @@ func (d *DataBase) InvalidateConversationSyncV2Stream(ctx context.Context, id st
 }
 
 // AcceptConversationSyncV2State compares a network query with the epoch captured
-// before that query. Changing an opaque boundary token invalidates older reads;
-// tokens are compared for equality only, never ordered as event versions.
+// before that query. Each accepted query reserves a new local epoch so even
+// same-token history and sync responses cannot overwrite each other's state.
+// Opaque tokens are compared for equality only, never ordered as event versions.
 func (d *DataBase) AcceptConversationSyncV2State(ctx context.Context, epoch uint64, state *model_struct.LocalConversationSyncV2Stream) (*model_struct.LocalConversationSyncV2Stream, error) {
 	if state == nil || state.ConversationID == "" || state.StateToken == "" {
 		return nil, fmt.Errorf("sync v2: invalid stream state")
@@ -55,7 +59,7 @@ func (d *DataBase) AcceptConversationSyncV2State(ctx context.Context, epoch uint
 			return err
 		}
 		if current.Epoch != epoch {
-			return fmt.Errorf("sync v2: stale state response")
+			return fmt.Errorf("%w: stale state response", sdkerrs.ErrSyncV2StateChanged)
 		}
 		accepted = *state
 		accepted.ScannedSeq = current.ScannedSeq
@@ -74,10 +78,7 @@ func (d *DataBase) AcceptConversationSyncV2State(ctx context.Context, epoch uint
 				accepted.PendingSeqs = append(accepted.PendingSeqs, seq)
 			}
 		}
-		accepted.Epoch = current.Epoch
-		if current.StateToken != state.StateToken {
-			accepted.Epoch++
-		}
+		accepted.Epoch = current.Epoch + 1
 		if accepted.PermissionMaxSeq > 0 {
 			accepted.ScannedSeq = min(accepted.ScannedSeq, accepted.PermissionMaxSeq)
 		}
@@ -114,7 +115,7 @@ func (d *DataBase) GetConversationSyncV2Epochs(ctx context.Context, ids []string
 
 func mergeConversationSyncV2Progress(current, progress *model_struct.LocalConversationSyncV2Stream, epoch uint64, resolved []int64) (*model_struct.LocalConversationSyncV2Stream, error) {
 	if current.Epoch != epoch || current.StateToken != "" && current.StateToken != progress.StateToken {
-		return nil, fmt.Errorf("sync v2: stale stream response")
+		return nil, fmt.Errorf("%w: stale stream response", sdkerrs.ErrSyncV2StateChanged)
 	}
 	if progress.MinSeq < 0 || progress.PermissionMaxSeq < 0 || progress.ScannedSeq < 0 {
 		return nil, fmt.Errorf("sync v2: invalid stream bounds")
@@ -178,6 +179,17 @@ func (d *DataBase) CommitConversationSyncV2Notifications(ctx context.Context, ep
 // CommitConversationSyncV2Messages stores actual chat messages and unresolved
 // sequence bookkeeping atomically. It never synthesizes deleted messages.
 func (d *DataBase) CommitConversationSyncV2Messages(ctx context.Context, epoch uint64, progress *model_struct.LocalConversationSyncV2Stream, messages []*model_struct.LocalChatLog) error {
+	return d.commitConversationSyncV2Messages(ctx, epoch, progress, messages, nil)
+}
+
+func (d *DataBase) CommitConversationSyncV2History(ctx context.Context, epoch uint64, progress *model_struct.LocalConversationSyncV2Stream, messages []*model_struct.LocalChatLog, state *pb.State) error {
+	if state == nil || progress == nil || !state.Known || state.ConversationID != progress.ConversationID || state.StateToken != progress.StateToken || state.MinSeq != progress.MinSeq || state.PermissionMaxSeq != progress.PermissionMaxSeq || state.MaxSeq < 0 || state.UnreadCount < 0 || state.UnreadCount > math.MaxInt32 {
+		return fmt.Errorf("sync v2: invalid history state")
+	}
+	return d.commitConversationSyncV2Messages(ctx, epoch, progress, messages, state)
+}
+
+func (d *DataBase) commitConversationSyncV2Messages(ctx context.Context, epoch uint64, progress *model_struct.LocalConversationSyncV2Stream, messages []*model_struct.LocalChatLog, state *pb.State) error {
 	if progress == nil || progress.ConversationID == "" || progress.Notifications {
 		return fmt.Errorf("sync v2: invalid chat progress")
 	}
@@ -208,6 +220,15 @@ func (d *DataBase) CommitConversationSyncV2Messages(ctx context.Context, epoch u
 			updates = append(updates, clause.Assignment{Column: clause.Column{Name: "status"}, Value: gorm.Expr("CASE WHEN status >= ? THEN status ELSE excluded.status END", constant.MsgStatusHasDeleted)}, clause.Assignment{Column: clause.Column{Name: "is_read"}, Value: gorm.Expr("CASE WHEN is_read THEN is_read ELSE excluded.is_read END")})
 			if err := tx.Table(utils.GetTableName(progress.ConversationID)).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "client_msg_id"}}, DoUpdates: updates}).Create(messages).Error; err != nil {
 				return err
+			}
+		}
+		if state != nil {
+			result := tx.Model(&model_struct.LocalConversation{}).Where("conversation_id = ?", progress.ConversationID).Updates(map[string]interface{}{"min_seq": state.MinSeq, "max_seq": state.MaxSeq, "unread_count": state.UnreadCount})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("sync v2: history conversation not loaded")
 			}
 		}
 		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(next).Error

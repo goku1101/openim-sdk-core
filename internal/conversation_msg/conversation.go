@@ -249,6 +249,10 @@ func (c *Conversation) fetchMessagesWithGapCheck(ctx context.Context, conversati
 	// If the number of valid messages retrieved is less than the count,
 	// continue fetching recursively until the valid messages are sufficient or all messages have been fetched.
 	missingCount := shouldFetchMoreMessagesNum(list)
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy && messageListCallback.ErrCode != 0 {
+		messageListCallback.IsEnd = false
+		return validMessages, nil
+	}
 	if missingCount > 0 && !messageListCallback.IsEnd {
 		newStartTime, newStartSeq, newStartClientMsgID := getNewStartMessageInfo(list)
 		// First-batch zero-cursor substitution: when entering a conversation for the first time

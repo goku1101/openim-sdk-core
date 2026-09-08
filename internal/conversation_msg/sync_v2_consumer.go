@@ -3,6 +3,7 @@ package conversation_msg
 import (
 	"context"
 	"fmt"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"sort"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
@@ -36,7 +37,7 @@ func (c *Conversation) consumeConversationSyncV2(ctx context.Context, progress *
 		return err
 	}
 	if current.Epoch != progress.Epoch || current.StateToken != progress.StateToken {
-		return fmt.Errorf("sync v2: stale queued messages")
+		return fmt.Errorf("%w: stale queued messages", sdkerrs.ErrSyncV2StateChanged)
 	}
 	for _, message := range messages {
 		if message == nil || message.ClientMsgID == "" || message.Seq < max(int64(1), progress.MinSeq) || progress.PermissionMaxSeq > 0 && message.Seq > progress.PermissionMaxSeq {

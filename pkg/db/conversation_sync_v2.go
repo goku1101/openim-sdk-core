@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -73,7 +74,7 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 			return err
 		}
 		if current.Revision != expected.Revision || current.Generation != expected.Generation || current.SnapshotID != expected.SnapshotID || current.Stage != expected.Stage || current.VersionID != expected.VersionID || current.Version != expected.Version {
-			return fmt.Errorf("sync v2: stale details round")
+			return fmt.Errorf("%w: stale details round", sdkerrs.ErrSyncV2StateChanged)
 		}
 		checkIDs := append(append([]string(nil), checkpoint.SelectedIDs...), deleted...)
 		epochs, err := conversationSyncV2Epochs(tx, checkIDs)
@@ -82,7 +83,7 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 		}
 		for _, id := range checkIDs {
 			if epochs[id] != checkpoint.StateEpochs[id] {
-				return fmt.Errorf("sync v2: details invalidated by conversation event")
+				return fmt.Errorf("%w: details invalidated by conversation event", sdkerrs.ErrSyncV2StateChanged)
 			}
 		}
 		for _, id := range deleted {
@@ -149,7 +150,7 @@ func (d *DataBase) SaveConversationSyncV2(ctx context.Context, checkpoint *model
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("sync v2: stale checkpoint generation")
+		return fmt.Errorf("%w: stale checkpoint generation", sdkerrs.ErrSyncV2StateChanged)
 	}
 	return nil
 }

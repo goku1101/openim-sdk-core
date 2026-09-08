@@ -2,6 +2,7 @@ package syncv2
 
 import (
 	"errors"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"net"
 )
 
@@ -20,6 +21,9 @@ const (
 // RecoveryFor classifies an action, never performs retries or selects legacy
 // mode. In particular a deployment error requires a fresh capability exchange.
 func RecoveryFor(err error) Recovery {
+	if errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+		return RefreshState
+	}
 	if errors.Is(err, ErrCatchupPending) {
 		return Retry
 	}

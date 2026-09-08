@@ -106,26 +106,8 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 		if err != nil {
 			return err
 		}
-		// A successful envelope alone is not proof that every requested sequence
-		// was examined. Reject duplicates and silent omissions before moving on.
-		outstanding := make(map[int64]bool, len(seqs))
-		for _, seq := range seqs {
-			outstanding[seq] = true
-		}
-		for _, message := range result.Messages {
-			if message == nil || message.ClientMsgID == "" || !outstanding[message.Seq] {
-				return fmt.Errorf("sync v2: unexpected message sequence")
-			}
-			delete(outstanding, message.Seq)
-		}
-		for _, seq := range result.UnresolvedSeqs {
-			if !outstanding[seq] {
-				return fmt.Errorf("sync v2: unexpected unresolved sequence")
-			}
-			delete(outstanding, seq)
-		}
-		if len(outstanding) != 0 {
-			return fmt.Errorf("sync v2: missing pull outcomes")
+		if err := validatePullOutcomes(seqs, result); err != nil {
+			return err
 		}
 		progress := *stream
 		progress.ScannedSeq = scanned
