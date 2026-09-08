@@ -247,6 +247,10 @@ func (c *Conversation) doReadDrawing(ctx context.Context, msg *sdkws.MsgData) er
 	}
 	if tips.MarkAsReadUserID != c.loginUserID {
 		if len(tips.Seqs) == 0 {
+			// The server also emits receipts when the read boundary did not advance.
+			if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+				return nil
+			}
 			return errs.New("tips Seqs is empty").Wrap()
 		}
 		var messages []*model_struct.LocalChatLog

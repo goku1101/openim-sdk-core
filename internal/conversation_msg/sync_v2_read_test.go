@@ -105,6 +105,12 @@ func TestSyncV2PeerReadBeforeLatestMessageProjection(t *testing.T) {
 	if err != nil || !row.IsRead || l.receipts != 1 {
 		t.Fatalf("receipt not applied: %+v %v %d", row, err, l.receipts)
 	}
+	tips.Seqs = nil
+	body, _ = json.Marshal(tips)
+	msg.Content, _ = json.Marshal(&sdkws.NotificationElem{Detail: string(body)})
+	if err = c.doReadDrawing(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
 	tips.ConversationID = "si_u_unloaded"
 	body, _ = json.Marshal(tips)
 	msg.Content, _ = json.Marshal(&sdkws.NotificationElem{Detail: string(body)})
