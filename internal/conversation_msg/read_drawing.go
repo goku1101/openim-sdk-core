@@ -232,6 +232,9 @@ func (c *Conversation) doReadDrawing(ctx context.Context, msg *sdkws.MsgData) er
 		return err
 	}
 	log.ZDebug(ctx, "do readDrawing", "tips", tips)
+	if tips.MarkAsReadUserID == c.loginUserID && c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+		return c.doConversationSyncV2SelfRead(ctx, tips)
+	}
 	conversation, err := c.db.GetConversation(ctx, tips.ConversationID)
 	if err != nil {
 		log.ZWarn(ctx, "GetConversation err", err, "conversationID", tips.ConversationID)
