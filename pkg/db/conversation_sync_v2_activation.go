@@ -28,5 +28,5 @@ func (d *DataBase) ActivateConversationSyncV2(ctx context.Context, before *model
 		next.NotificationIDs = append(next.NotificationIDs, id)
 	}
 	next.StateEpochs = map[string]uint64{id: epoch}
-	return d.applyConversationSyncV2Details(ctx, before, &next, &pb.StateResponse{States: []*pb.State{state}}, nil, []string{id})
+	return d.applyConversationSyncV2Details(ctx, before, &next, &pb.StateResponse{States: []*pb.State{state}}, nil, []string{id}, false)
 }

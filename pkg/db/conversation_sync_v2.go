@@ -30,7 +30,7 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 	if checkpoint == nil || checkpoint.UserID != d.loginUserID || checkpoint.Stage != "details" || response == nil {
 		return fmt.Errorf("sync v2: invalid details checkpoint")
 	}
-	return d.applyConversationSyncV2Details(ctx, checkpoint, checkpoint, response, nil, checkpoint.SelectedIDs)
+	return d.applyConversationSyncV2Details(ctx, checkpoint, checkpoint, response, nil, checkpoint.SelectedIDs, false)
 }
 
 // Metadata version, current details and explicit deletions commit atomically.
@@ -39,10 +39,10 @@ func (d *DataBase) ApplyConversationSyncV2Metadata(ctx context.Context, before, 
 	if before == nil || next == nil || response == nil || before.UserID != d.loginUserID || next.UserID != d.loginUserID || before.Generation != next.Generation || before.SnapshotID != next.SnapshotID || before.VersionID != next.VersionID || next.Version < before.Version || next.Stage != "messages" || before.Stage != "messages" && before.Stage != "catchup" && before.Stage != "ready" {
 		return fmt.Errorf("sync v2: invalid metadata checkpoint")
 	}
-	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted, next.SelectedIDs)
+	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted, next.SelectedIDs, false)
 }
 
-func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected, checkpoint *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted, refreshed []string) error {
+func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected, checkpoint *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted, refreshed []string, existingOnly bool) error {
 	selected := make(map[string]bool, len(refreshed))
 	for _, id := range refreshed {
 		selected[id] = true
@@ -55,7 +55,9 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 		unavailable[id] = true
 	}
 	next := *checkpoint
-	next.Stage = "messages"
+	if !existingOnly {
+		next.Stage = "messages"
+	}
 	next.Revision = expected.Revision + 1
 	next.PendingStateIDs = nil
 	retained := make(map[string]bool, len(checkpoint.SelectedIDs))
@@ -149,7 +151,11 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 					updates = append(updates, key)
 				}
 			}
-			if err := tx.Table(model_struct.LocalConversation{}.TableName()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.AssignmentColumns(updates)}).Create(columns).Error; err != nil {
+			if existingOnly {
+				if err := tx.Model(&model_struct.LocalConversation{}).Where("conversation_id = ?", id).Updates(columns).Error; err != nil {
+					return err
+				}
+			} else if err := tx.Table(model_struct.LocalConversation{}.TableName()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.AssignmentColumns(updates)}).Create(columns).Error; err != nil {
 				return err
 			}
 		}

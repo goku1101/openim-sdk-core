@@ -5,6 +5,7 @@ package conversation_msg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/ccontext"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
@@ -17,6 +18,7 @@ import (
 	"github.com/openimsdk/protocol/sdkws"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -130,11 +132,13 @@ func TestSyncV2PeerReadBeforeLatestMessageProjection(t *testing.T) {
 
 func TestSyncV2LiveSelfReadRefreshesAuthoritativeUnreadWithoutHistory(t *testing.T) {
 	states := 0
+	var responseID atomic.Value
+	responseID.Store("si_u_v")
+	var known atomic.Bool
+	known.Store(true)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var result any
 		switch r.URL.Path {
-		case "/conversation/get_incremental_conversations":
-			result = &conversation.GetIncrementalConversationResp{VersionID: "v", Version: 1}
 		case "/msg/sync_seqs_v2":
 			states++
 			var q pb.StateRequest
@@ -142,9 +146,9 @@ func TestSyncV2LiveSelfReadRefreshesAuthoritativeUnreadWithoutHistory(t *testing
 				t.Error(err)
 			}
 			if len(q.ConversationIDs) != 1 || q.ConversationIDs[0] != "si_u_v" {
-				t.Errorf("activated unloaded receipt: %+v", q)
+				t.Errorf("activated unloaded receipt: %+v", &q)
 			}
-			result = &pb.StateResponse{States: []*pb.State{{ConversationID: "si_u_v", Known: true, StateToken: "t", MinSeq: 20, MaxSeq: 30, UnreadCount: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "si_u_v"}}}}
+			result = &pb.StateResponse{States: []*pb.State{{ConversationID: responseID.Load().(string), Known: known.Load(), StateToken: "t", MinSeq: 20, MaxSeq: 30, UnreadCount: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "si_u_v"}}}}
 		default:
 			t.Errorf("unexpected/history request: %s", r.URL.Path)
 			w.WriteHeader(500)
@@ -161,7 +165,7 @@ func TestSyncV2LiveSelfReadRefreshesAuthoritativeUnreadWithoutHistory(t *testing
 		t.Fatal(err)
 	}
 	defer d.Close(ctx)
-	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", SnapshotID: "s", Stage: "snapshot", VersionID: "v", Version: 1, SelectedIDs: []string{"si_u_v"}}
+	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", SnapshotID: "s", Stage: "snapshot", VersionID: "v", Version: 1, SelectedIDs: []string{"si_u_v", "si_u_other"}}
 	if err = d.SaveConversationSyncV2(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -179,11 +183,30 @@ func TestSyncV2LiveSelfReadRefreshesAuthoritativeUnreadWithoutHistory(t *testing
 	if err = c.doConversationSyncV2SelfRead(ctx, &sdkws.MarkAsReadTips{ConversationID: "si_u_unloaded", MarkAsReadUserID: "u"}); err != nil {
 		t.Fatal(err)
 	}
+	if states != 0 {
+		t.Fatalf("unloaded receipt requested %d state batches", states)
+	}
+	if err = c.doConversationSyncV2SelfRead(ctx, &sdkws.MarkAsReadTips{ConversationID: "si_u_v", MarkAsReadUserID: "u"}); err != nil {
+		t.Fatal(err)
+	}
 	row, err := d.GetConversation(ctx, "si_u_v")
 	if err != nil || row.UnreadCount != 2 || row.MinSeq != 20 || states != 1 {
 		t.Fatalf("authoritative state not refreshed: %+v %v requests=%d", row, err, states)
 	}
 	if _, err = d.GetConversation(ctx, "si_u_unloaded"); err == nil {
 		t.Fatal("read notification activated a chat")
+	}
+	responseID.Store("si_u_other")
+	if err = c.doConversationSyncV2SelfRead(ctx, &sdkws.MarkAsReadTips{ConversationID: "si_u_v", MarkAsReadUserID: "u"}); err == nil {
+		t.Fatal("accepted read state for a different conversation")
+	}
+	responseID.Store("si_u_v")
+	known.Store(false)
+	if err = c.doConversationSyncV2SelfRead(ctx, &sdkws.MarkAsReadTips{ConversationID: "si_u_v", MarkAsReadUserID: "u"}); !errors.Is(err, syncv2.ErrStatePending) {
+		t.Fatalf("unknown state was acknowledged: %v", err)
+	}
+	row, err = d.GetConversation(ctx, "si_u_v")
+	if err != nil || row.UnreadCount != 2 {
+		t.Fatalf("unconfirmed read state overwrote unread: %+v %v", row, err)
 	}
 }

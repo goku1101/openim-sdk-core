@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 	"gorm.io/gorm"
@@ -71,4 +73,15 @@ func (d *DataBase) GetConversationSyncV2LocalReadMessages(ctx context.Context, i
 	var rows []*model_struct.LocalChatLog
 	err := d.conn.WithContext(ctx).Table(table).Where("seq IN ?", seqs).Order("send_time DESC").Find(&rows).Error
 	return rows, err
+}
+
+// RefreshConversationSyncV2ReadState keeps selection/version metadata intact and
+// uses UPDATE, so a late read response cannot create or resurrect a conversation.
+func (d *DataBase) RefreshConversationSyncV2ReadState(ctx context.Context, before *model_struct.LocalConversationSyncV2, epoch uint64, state *pb.State) error {
+	if before == nil || before.UserID != d.loginUserID || state == nil || state.ConversationID == "" || !state.Known || state.Conversation == nil || state.StateToken == "" || before.Stage != "ready" && before.Stage != "messages" && before.Stage != "catchup" {
+		return fmt.Errorf("sync v2: invalid read state")
+	}
+	next := *before
+	next.StateEpochs = map[string]uint64{state.ConversationID: epoch}
+	return d.applyConversationSyncV2Details(ctx, before, &next, &pb.StateResponse{States: []*pb.State{state}}, nil, []string{state.ConversationID}, true)
 }
