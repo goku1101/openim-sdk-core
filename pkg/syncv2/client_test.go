@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
@@ -62,6 +63,13 @@ func TestClientPreservesServerError(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.ErrCode != 14 || apiErr.ErrMsg != "SYNC_V2_REDIS_UNAVAILABLE" || apiErr.ErrDlt != "retry" {
 		t.Fatalf("lost server error: %v", err)
 	}
+	if !strings.Contains(err.Error(), "/conversation/sync_capabilities") || strings.Contains(err.Error(), "retry") {
+		t.Fatalf("missing safe route or leaked error detail: %v", err)
+	}
+	if RecoveryFor(err) != Retry {
+		t.Fatalf("route context changed recovery: %v", err)
+	}
+
 }
 
 func TestReleaseAcceptsServerEmptyEnvelope(t *testing.T) {

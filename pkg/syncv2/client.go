@@ -76,7 +76,7 @@ func (c *Client) invoke(ctx context.Context, operationID, route string, req, res
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, &HTTPError{StatusCode: response.StatusCode}
+		return nil, fmt.Errorf("%s: %w", route, &HTTPError{StatusCode: response.StatusCode})
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
@@ -98,7 +98,7 @@ func (c *Client) invoke(ctx context.Context, operationID, route string, req, res
 		return nil, fmt.Errorf("sync v2: response is missing errCode")
 	}
 	if *envelope.ErrCode != 0 {
-		return nil, &APIError{ErrCode: *envelope.ErrCode, ErrMsg: envelope.ErrMsg, ErrDlt: envelope.ErrDlt}
+		return nil, fmt.Errorf("%s: %w", route, &APIError{ErrCode: *envelope.ErrCode, ErrMsg: envelope.ErrMsg, ErrDlt: envelope.ErrDlt})
 	}
 	if len(envelope.Data) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) {
 		// apiresp omits data for ReleaseResponse because it has no public fields.
