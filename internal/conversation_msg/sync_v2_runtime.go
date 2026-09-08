@@ -25,6 +25,8 @@ const (
 type conversationSyncV2Store interface {
 	syncv2.CoordinatorStore
 	syncv2.ActivationStore
+	GetConversationSyncV2HistoryPage(context.Context, string, int, int64, int64, string, bool) ([]*model_struct.LocalChatLog, error)
+	FilterConversationSyncV2History(context.Context, string, []*model_struct.LocalChatLog) ([]*model_struct.LocalChatLog, error)
 	InvalidateConversationSyncV2Stream(context.Context, string) error
 	CommitConversationSyncV2History(context.Context, uint64, *model_struct.LocalConversationSyncV2Stream, []*model_struct.LocalChatLog, *pb.State) error
 	GetConversationSyncV2LatestMessage(context.Context, string, int64, int64) ([]*model_struct.LocalChatLog, error)

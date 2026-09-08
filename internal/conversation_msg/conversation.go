@@ -61,6 +61,11 @@ func (c *Conversation) getAdvancedHistoryMessageList(ctx context.Context, req sd
 	var err error
 	var messageList sdk_struct.NewMsgList
 	conversationID = req.ConversationID
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		if err = c.ensureConversationSyncV2HistoryState(ctx, conversationID); err != nil {
+			return nil, err
+		}
+	}
 	if len(req.StartClientMsgID) > 0 {
 		m, err := c.db.GetMessage(ctx, conversationID, req.StartClientMsgID)
 		if err != nil {
@@ -88,6 +93,12 @@ func (c *Conversation) getAdvancedHistoryMessageList(ctx context.Context, req sd
 	log.ZDebug(ctx, "pull message", "pull cost time", time.Since(t).String())
 	t = time.Now()
 
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		list, err = c.syncV2.store.FilterConversationSyncV2History(ctx, conversationID, list)
+		if err != nil {
+			return nil, err
+		}
+	}
 	messageList = c.LocalChatLog2MsgStruct(list)
 	log.ZDebug(ctx, "message convert and unmarshal", "unmarshal cost time", time.Since(t))
 	t = time.Now()
@@ -210,7 +221,12 @@ func (c *Conversation) fetchMessagesWithGapCheck(ctx context.Context, conversati
 	}
 
 	t := time.Now()
-	list, err := c.db.GetMessageList(ctx, conversationID, count, startTime, startSeq, startClientMsgID, isReverse)
+	var err error
+	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+		list, err = c.syncV2.store.GetConversationSyncV2HistoryPage(ctx, conversationID, count, startTime, startSeq, startClientMsgID, isReverse)
+	} else {
+		list, err = c.db.GetMessageList(ctx, conversationID, count, startTime, startSeq, startClientMsgID, isReverse)
+	}
 	log.ZDebug(ctx, "db get messageList", "cost time", time.Since(t), "len", len(list), "err",
 		err, "conversationID", conversationID)
 

@@ -112,6 +112,11 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 			}
 		}
 		for _, id := range refreshed {
+			// A detail response may change permissions while an older message
+			// request is in flight. Retire that request in this same transaction.
+			if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"epoch": gorm.Expr("epoch + 1"), "state_token": ""})}).Create(&model_struct.LocalConversationSyncV2Stream{ConversationID: id, Epoch: 1}).Error; err != nil {
+				return err
+			}
 			if unavailable[id] {
 				continue
 			}
@@ -137,11 +142,6 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 					return fmt.Errorf("sync v2: invalid effective bounds or unread count")
 				}
 				columns["min_seq"], columns["max_seq"], columns["unread_count"] = state.MinSeq, state.MaxSeq, state.UnreadCount
-				// A detail response may change permissions while an older message
-				// request is in flight. Retire that request in this same transaction.
-				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"epoch": gorm.Expr("epoch + 1"), "state_token": ""})}).Create(&model_struct.LocalConversationSyncV2Stream{ConversationID: id, Epoch: 1}).Error; err != nil {
-					return err
-				}
 			}
 			updates := make([]string, 0, len(columns)-1)
 			for key := range columns {

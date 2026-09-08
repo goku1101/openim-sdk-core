@@ -91,3 +91,33 @@ func (c *Conversation) fetchConversationSyncV2History(ctx context.Context, id st
 		fail(syncv2.ErrStatePending)
 	}
 }
+
+func (c *Conversation) ensureConversationSyncV2HistoryState(ctx context.Context, id string) error {
+	runtime := c.syncV2
+	if runtime.mode.Load() != syncV2Enabled {
+		return syncv2.ErrStatePending
+	}
+	stream, err := runtime.store.GetConversationSyncV2Stream(ctx, id)
+	if err != nil {
+		return err
+	}
+	if stream.Initialized && stream.StateToken != "" {
+		return nil
+	}
+	runtime.capsMu.RLock()
+	caps := runtime.caps
+	runtime.capsMu.RUnlock()
+	if caps == nil {
+		return syncv2.ErrStatePending
+	}
+	if ccontext.Info(ctx).OperationID() == "" {
+		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
+	}
+	page, err := runtime.client.ReadSequencePage(ctx, ccontext.Info(ctx).OperationID(), &pb.PullRequest{UserID: c.loginUserID, ConversationID: id}, caps, runtime.store)
+	if err != nil {
+		return err
+	}
+	return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
+		return runtime.store.CommitConversationSyncV2History(ctx, page.Progress.Epoch, page.Progress, nil, page.Response.State)
+	})
+}
