@@ -29,6 +29,7 @@ type LocalConversationSyncV2Stream struct {
 	Notifications    bool    `gorm:"column:notifications"`
 	Self             bool    `gorm:"column:self"`
 	StateToken       string  `gorm:"column:state_token"`
+	Initialized      bool    `gorm:"column:initialized"`
 	MinSeq           int64   `gorm:"column:min_seq"`
 	PermissionMaxSeq int64   `gorm:"column:permission_max_seq"`
 	ScannedSeq       int64   `gorm:"column:scanned_seq"`

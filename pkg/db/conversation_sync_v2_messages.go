@@ -59,6 +59,15 @@ func (d *DataBase) AcceptConversationSyncV2State(ctx context.Context, epoch uint
 		}
 		accepted = *state
 		accepted.ScannedSeq = current.ScannedSeq
+		accepted.Initialized = true
+		if state.Notifications && !current.Initialized {
+			var legacy model_struct.NotificationSeqs
+			err := tx.Where("conversation_id = ?", state.ConversationID).Take(&legacy).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			accepted.ScannedSeq = max(accepted.ScannedSeq, legacy.Seq)
+		}
 		accepted.PendingSeqs = nil
 		for _, seq := range current.PendingSeqs {
 			if seq >= max(int64(1), state.MinSeq) && (state.PermissionMaxSeq == 0 || seq <= state.PermissionMaxSeq) {
@@ -112,6 +121,7 @@ func mergeConversationSyncV2Progress(current, progress *model_struct.LocalConver
 	}
 	next := *progress
 	next.Epoch = epoch
+	next.Initialized = true
 	next.ScannedSeq = max(next.ScannedSeq, current.ScannedSeq)
 	if next.PermissionMaxSeq > 0 {
 		next.ScannedSeq = min(next.ScannedSeq, next.PermissionMaxSeq)

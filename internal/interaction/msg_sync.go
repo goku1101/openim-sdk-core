@@ -46,19 +46,37 @@ const (
 // MsgSyncer is a central hub for message relay, responsible for sequential message gap pulling,
 // handling network events, and managing app foreground and background events.
 type MsgSyncer struct {
-	loginUserID       string                // login user ID
-	longConnMgr       *LongConnMgr          // long connection manager
-	recvCh            chan common.Cmd2Value // channel for receiving push messages and the maximum SEQ number
-	conversationCh    chan common.Cmd2Value // storage and session triggering
-	syncedMaxSeqs     map[string]int64      // map of the maximum synced SEQ numbers for all group IDs
-	syncedMaxSeqsLock sync.RWMutex          // syncedMaxSeqs map lock
-	db                db_interface.DataBase // data store
-	syncTimes         int                   // times of sync
-	ctx               context.Context       // context
-	reinstalled       bool                  //true if the app was uninstalled and reinstalled
-	isSyncing         bool                  // indicates whether data is being synced
-	isSyncingLock     sync.Mutex            // lock for syncing state
+	loginUserID        string                // login user ID
+	longConnMgr        *LongConnMgr          // long connection manager
+	recvCh             chan common.Cmd2Value // channel for receiving push messages and the maximum SEQ number
+	conversationCh     chan common.Cmd2Value // storage and session triggering
+	syncedMaxSeqs      map[string]int64      // map of the maximum synced SEQ numbers for all group IDs
+	syncedMaxSeqsLock  sync.RWMutex          // syncedMaxSeqs map lock
+	db                 db_interface.DataBase // data store
+	syncTimes          int                   // times of sync
+	ctx                context.Context       // context
+	reinstalled        bool                  //true if the app was uninstalled and reinstalled
+	isSyncing          bool                  // indicates whether data is being synced
+	isSyncingLock      sync.Mutex            // lock for syncing state
+	conversationSyncV2 func(context.Context, bool) (bool, error)
+}
 
+// SetConversationSyncV2 is configured before starting the message listener.
+// The coordinator owns V2 callbacks and persistence; errors cannot select legacy.
+func (m *MsgSyncer) SetConversationSyncV2(run func(context.Context, bool) (bool, error)) {
+	m.conversationSyncV2 = run
+}
+
+func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
+	if m.conversationSyncV2 == nil {
+		return false
+	}
+	handled, err := m.conversationSyncV2(ctx, m.reinstalled)
+	if err != nil {
+		log.ZWarn(ctx, "conversation sync V2 failed", err)
+		return true
+	}
+	return handled
 }
 
 // NewMsgSyncer creates a new instance of the message synchronizer.
@@ -369,6 +387,9 @@ func (m *MsgSyncer) pushTriggerAndSync(ctx context.Context, pushMessages map[str
 
 // Called after successful reconnection to synchronize the latest message
 func (m *MsgSyncer) doConnected(ctx context.Context) {
+	if m.tryConversationSyncV2(ctx) {
+		return
+	}
 	reinstalled := m.reinstalled
 	if reinstalled {
 		common.TriggerCmdSyncFlag(m.ctx, constant.AppDataSyncStart, m.conversationCh)
@@ -392,6 +413,9 @@ func (m *MsgSyncer) doConnected(ctx context.Context) {
 }
 
 func (m *MsgSyncer) doWakeupDataSync(ctx context.Context) {
+	if m.tryConversationSyncV2(ctx) {
+		return
+	}
 	common.TriggerCmdSyncData(ctx, m.conversationCh)
 	var resp sdkws.GetMaxSeqResp
 	if err := m.longConnMgr.SendReqWaitResp(m.ctx, &sdkws.GetMaxSeqReq{UserID: m.loginUserID}, constant.GetNewestSeq, &resp); err != nil {
@@ -404,6 +428,9 @@ func (m *MsgSyncer) doWakeupDataSync(ctx context.Context) {
 }
 
 func (m *MsgSyncer) doIMMessageSync(ctx context.Context) {
+	if m.tryConversationSyncV2(ctx) {
+		return
+	}
 	var resp sdkws.GetMaxSeqResp
 	if err := m.longConnMgr.SendReqWaitResp(m.ctx, &sdkws.GetMaxSeqReq{UserID: m.loginUserID}, constant.GetNewestSeq, &resp); err != nil {
 		log.ZError(m.ctx, "get max seq error", err)

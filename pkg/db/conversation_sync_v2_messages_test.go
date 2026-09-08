@@ -173,3 +173,33 @@ func TestSyncV2ProgressWriteFailureRollsBackMessages(t *testing.T) {
 		t.Fatal("message committed without its progress")
 	}
 }
+
+func TestSyncV2NotificationAdoptsLegacyCursorOnlyOnce(t *testing.T) {
+	ctx := context.Background()
+	d, err := NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	if err = d.SetNotificationSeq(ctx, "n_g", 42); err != nil {
+		t.Fatal(err)
+	}
+	// An event may invalidate the stream before its first V2 state query.
+	if err = d.InvalidateConversationSyncV2Stream(ctx, "n_g"); err != nil {
+		t.Fatal(err)
+	}
+	state := &model_struct.LocalConversationSyncV2Stream{ConversationID: "n_g", ParentID: "sg_g", Notifications: true, StateToken: "a", MinSeq: 1}
+	accepted, err := d.AcceptConversationSyncV2State(ctx, 1, state)
+	if err != nil || accepted.ScannedSeq != 42 {
+		t.Fatalf("legacy progress lost: %+v %v", accepted, err)
+	}
+	// A later unrelated legacy write must not skip work owned by V2.
+	if err = d.SetNotificationSeq(ctx, "n_g", 90); err != nil {
+		t.Fatal(err)
+	}
+	state.StateToken = "b"
+	accepted, err = d.AcceptConversationSyncV2State(ctx, accepted.Epoch, state)
+	if err != nil || accepted.ScannedSeq != 42 {
+		t.Fatalf("legacy cursor adopted twice: %+v %v", accepted, err)
+	}
+}

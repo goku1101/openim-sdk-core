@@ -1,6 +1,6 @@
 # 会话同步 V2：Core 实现记录
 
-日期：2026-09-08。当前完成协议请求、快照准备、原生数据库检查点、详情事务落库和消息分批，**尚未接入登录、重连等运行入口，也未生成支持 V2 的 Android/iOS 二进制**。
+日期：2026-09-08。当前完成协议请求、快照准备、原生数据库检查点、详情事务落库、分批流扫描和会话队列消费确认。登录/重连协调器尚未接线；**App 尚未启用 V2，也未生成支持 V2 的 Android/iOS 二进制**。后续开发、编译和 App 依赖接入均在本地 worktree 完成，不推送 GitHub。
 
 ## 契约来源
 
@@ -28,13 +28,21 @@
 - 通知进度单独提交，旧 NotificationSeqs 游标停在最早未解决缺口之前。好友、群、用户、会话通知处理器现已返回错误，供 V2 消费者在成功处理后提交进度；旧调用方保留原有行为。
 - 合成 5 万会话用例验证只请求 150 个选中聊天的详情，仍遍历全部通知父 ID；这不是大账号真机性能验收。
 
+### 本地推进：流扫描与消费确认
+
+- `SyncStream` 按当前权限边界逐批扫描，每轮对已有缺口只重试一次；新缺口保存到下一轮。返回结果缺少请求序号、重复序号或流令牌不一致时拒绝推进游标。
+- `SyncStreams` 分批读取状态，并在每批 HTTP 请求前捕获 epoch。合成 50,000 个通知父会话及自通知的测试只产生 101 次状态请求，不为每个会话单发请求；这是请求规模测试，不是大账号真实耗时测量。
+- 第一次接纳通知流状态时，在同一事务继承旧 `NotificationSeqs` 游标；即使此前已有失效记录也可继承。后续不再从旧游标覆盖 V2 进度，避免重新消费旧通知或跳过新任务。
+- `ConsumeConversationSyncV2` 在现有 Conversation 串行队列内消费，消息用现有历史转换方式保留内容、组接收 ID 和服务端明确的删除状态。落库成功才返回确认；通知处理失败不提交游标，已取消或失效的排队响应不能继续落库。
+- `MsgSyncer` 的连接、唤醒和手动同步入口已有 V2 协调器钩子；钩子返回错误时不能进入旧 WS 流程。**当前尚未安装该钩子，不能把入口单元测试视为生产链路已启用。**
+- 当前消费者只负责消息/通知持久化确认；会话最新消息投影、头像名称补齐、UI 回调、事件失效调用和完整轮次成功回调仍需统一接入。
+
 验证命令（Go 1.24）：
 
 ```sh
-go test ./pkg/syncv2 -race -count=1
-go test ./pkg/db -run '^TestSyncV2' -count=1
-go test ./internal/conversation_msg ./internal/interaction -run '^$'
-go test ./internal/conversation_msg -run '^TestSyncV2' -count=1
+go test ./pkg/syncv2 ./pkg/common -race -count=1
+go test ./internal/conversation_msg ./pkg/db ./internal/interaction -run SyncV2 -race -count=1
+go test ./open_im_sdk -run '^$'
 git diff --check
 ```
 

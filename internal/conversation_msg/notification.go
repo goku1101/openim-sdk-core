@@ -47,6 +47,8 @@ func (c *Conversation) Work(c2v common.Cmd2Value) {
 	log.ZDebug(c2v.Ctx, "NotificationCmd start", "caller", c2v.Caller, "cmd", c2v.Cmd, "value", c2v.Value)
 	defer log.ZDebug(c2v.Ctx, "NotificationCmd end", "caller", c2v.Caller, "cmd", c2v.Cmd, "value", c2v.Value)
 	switch c2v.Cmd {
+	case common.CmdConversationSyncV2:
+		c2v.Value.(*common.ConversationSyncV2Task).Run(c2v.Ctx)
 	case constant.CmdNewMsgCome:
 		c.doMsgNew(c2v)
 	case constant.CmdUpdateConversation:
