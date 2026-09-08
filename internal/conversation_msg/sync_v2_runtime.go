@@ -25,6 +25,7 @@ const (
 
 type conversationSyncV2Store interface {
 	syncv2.RetryStore
+	UpdateConversationSyncV2RetryPayload(context.Context, *model_struct.LocalConversationSyncV2Retry, string) error
 	PutConversationSyncV2Retry(context.Context, *model_struct.LocalConversationSyncV2Retry) error
 	ResumeConversationSyncV2Retries(context.Context, int64) error
 	syncv2.CoordinatorStore

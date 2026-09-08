@@ -108,6 +108,11 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				return fmt.Errorf("sync v2: missing captured epoch")
 			}
 			stream, err := c.syncStreamState(ctx, op, queries[id], caps, store, commit, epoch, states[id])
+			if RecoveryFor(err) == Unavailable {
+				result.UnavailableIDs = append(result.UnavailableIDs, id)
+				advance()
+				continue
+			}
 			if errors.Is(err, ErrStatePending) {
 				result.PendingIDs = append(result.PendingIDs, id)
 				advance()

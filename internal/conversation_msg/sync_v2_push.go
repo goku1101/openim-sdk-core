@@ -17,7 +17,7 @@ import (
 
 // ProcessConversationSyncV2Push is invoked by MsgSyncer, never its consumer.
 // A failed V2 push remains V2; only negotiated legacy permits the old route.
-func (c *Conversation) ProcessConversationSyncV2Push(ctx context.Context, push *sdkws.PushMessages) (bool, error) {
+func (c *Conversation) processConversationSyncV2Push(ctx context.Context, push *sdkws.PushMessages, ephemeral bool) (bool, error) {
 	if c.syncV2 == nil || c.syncV2.mode.Load() == syncV2Legacy {
 		return false, nil
 	}
@@ -25,8 +25,19 @@ func (c *Conversation) ProcessConversationSyncV2Push(ctx context.Context, push *
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
 	newChats := make(map[string]map[string]bool)
+	if !ephemeral {
+		for id, batch := range push.Msgs {
+			ids := make(map[string]bool)
+			for _, message := range batch.Msgs {
+				if message.Seq > 0 {
+					ids[message.ClientMsgID] = true
+				}
+			}
+			newChats[id] = ids
+		}
+	}
 	for attempt := 0; attempt < 2; attempt++ {
-		err := c.processConversationSyncV2PushRound(ctx, push, attempt == 0, newChats)
+		err := c.processConversationSyncV2PushRound(ctx, push, ephemeral && attempt == 0, newChats)
 		if err == nil {
 			return true, nil
 		}
@@ -109,11 +120,15 @@ func (c *Conversation) processConversationSyncV2PushRound(ctx context.Context, p
 			return err
 		}
 		pending = len(result.PendingIDs) > 0
+		for _, id := range result.UnavailableIDs {
+			delete(push.NotificationMsgs, id)
+		}
 	}
 	for _, chat := range plan.Chats {
 		checkpoint, err := runtime.client.ActivateConversation(ctx, op, chat.ConversationID, caps, runtime.store)
 		if err != nil {
 			if syncv2.RecoveryFor(err) == syncv2.Unavailable {
+				delete(push.Msgs, chat.ConversationID)
 				continue
 			}
 			if errors.Is(err, syncv2.ErrStatePending) {
@@ -143,6 +158,10 @@ func (c *Conversation) processConversationSyncV2PushRound(ctx context.Context, p
 			return c.consumeConversationSyncV2LiveSelected(ctx, progress, messages, notifyIDs)
 		})
 		if err != nil {
+			if syncv2.RecoveryFor(err) == syncv2.Unavailable {
+				delete(push.Msgs, chat.ConversationID)
+				continue
+			}
 			return err
 		}
 		pending = pending || len(stream.PendingSeqs) > 0

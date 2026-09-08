@@ -80,3 +80,22 @@ func (d *DataBase) ResumeConversationSyncV2Retries(ctx context.Context, now int6
 		Where("due_at = ?", int64(math.MaxInt64)).
 		Updates(map[string]interface{}{"due_at": now, "attempts": 0, "revision": gorm.Expr("revision + 1")}).Error
 }
+
+// The owning attempt can remove terminal streams without reviving a replaced job.
+func (d *DataBase) UpdateConversationSyncV2RetryPayload(ctx context.Context, job *model_struct.LocalConversationSyncV2Retry, payload string) error {
+	if job == nil || job.TaskID == "" || job.Revision == 0 || !json.Valid([]byte(payload)) {
+		return fmt.Errorf("sync v2: invalid retry payload update")
+	}
+	d.mRWMutex.Lock()
+	defer d.mRWMutex.Unlock()
+	result := d.conn.WithContext(ctx).Model(&model_struct.LocalConversationSyncV2Retry{}).Where("task_id = ? AND revision = ?", job.TaskID, job.Revision).Updates(map[string]interface{}{"payload": payload, "revision": gorm.Expr("revision + 1")})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("sync v2: retry payload superseded")
+	}
+	job.Revision++
+	job.Payload = payload
+	return nil
+}

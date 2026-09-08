@@ -99,3 +99,24 @@ func TestSyncStreamsRejectsBatchInvalidatedDuringStateQuery(t *testing.T) {
 		t.Fatal("stale batch state accepted")
 	}
 }
+
+func TestSyncStreamsContinuesAfterPermissionIsLostDuringPull(t *testing.T) {
+	store := &batchStreamMemory{epochs: map[string]uint64{}}
+	pulls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/msg/sync_messages_v2" {
+			pulls++
+			fmt.Fprint(w, `{"errCode":7,"errMsg":"SYNC_V2_CONVERSATION_UNAVAILABLE"}`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{{ConversationID: "si_denied", Known: true, StateToken: "t", MinSeq: 1, MaxSeq: 1}, {ConversationID: "si_empty", Known: true, StateToken: "t", MinSeq: 1}}}})
+	}))
+	defer server.Close()
+	result, err := NewClient(server.URL, "", server.Client()).SyncStreams(context.Background(), "op", &pb.StateRequest{UserID: "u", ConversationIDs: []string{"si_denied", "si_empty"}}, &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, store, func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error {
+		t.Fatal("denied content was committed")
+		return nil
+	})
+	if err != nil || pulls != 1 || result.Completed != 1 || len(result.PendingIDs) != 0 || len(result.UnavailableIDs) != 1 || result.UnavailableIDs[0] != "si_denied" {
+		t.Fatalf("terminal read blocked remaining stream: %+v %v", result, err)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
+	"github.com/openimsdk/protocol/sdkws"
 )
 
 // StartConversationSyncV2Retries runs once per authenticated session. The owner
@@ -73,14 +74,31 @@ func (c *Conversation) persistConversationSyncV2Pending(ctx context.Context, res
 
 func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *model_struct.LocalConversationSyncV2Retry) error {
 	r := c.syncV2
-	r.runMu.Lock()
-	defer r.runMu.Unlock()
 	if r.mode.Load() == syncV2Legacy {
 		return fmt.Errorf("sync v2: retry paused in legacy session")
 	}
 	if c.GetConversationSyncState().Phase != "ready" {
 		return syncv2.ErrStatePending
 	}
+	if job.Kind == "push" {
+		var push sdkws.PushMessages
+		if err := json.Unmarshal([]byte(job.Payload), &push); err != nil {
+			return err
+		}
+		durable, err := syncv2.DurablePush(&push)
+		if err != nil {
+			return err
+		}
+		_, err = c.processConversationSyncV2Push(ctx, durable, false)
+		if ctx.Err() == nil && err != nil {
+			if updateErr := c.updateConversationSyncV2PushRetry(ctx, job, durable); updateErr != nil {
+				return updateErr
+			}
+		}
+		return err
+	}
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
 	if job.Kind != "reconcile" {
 		return fmt.Errorf("sync v2: unsupported retry task")
 	}

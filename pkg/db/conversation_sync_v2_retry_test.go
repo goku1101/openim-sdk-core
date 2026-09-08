@@ -95,3 +95,44 @@ func TestSyncV2RetryDeadlineAndAccountIsolation(t *testing.T) {
 		t.Fatal("canceled login wrote a retry")
 	}
 }
+
+func TestSyncV2RetryPayloadPruningPreservesNewerWork(t *testing.T) {
+	ctx := context.Background()
+	d, err := NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	job := &model_struct.LocalConversationSyncV2Retry{TaskID: "push", Kind: "push", Payload: `{"streams":["pending","denied"]}`, DueAt: 123}
+	if err = d.PutConversationSyncV2Retry(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	current, err := d.NextConversationSyncV2Retry(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := *current
+	if err = d.UpdateConversationSyncV2RetryPayload(ctx, current, `{"streams":["pending"]}`); err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision != stale.Revision+1 {
+		t.Fatal("payload update did not invalidate old receipt")
+	}
+	if err = d.UpdateConversationSyncV2RetryPayload(ctx, &stale, `{}`); err == nil {
+		t.Fatal("stale worker replaced current payload")
+	}
+	if err = d.AcknowledgeConversationSyncV2Retry(ctx, &stale); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.NextConversationSyncV2Retry(ctx)
+	if err != nil || got == nil || got.Payload != current.Payload || got.DueAt != 123 {
+		t.Fatalf("pruning lost unrelated work/deadline: %+v %v", got, err)
+	}
+	if err = d.AcknowledgeConversationSyncV2Retry(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.NextConversationSyncV2Retry(ctx)
+	if err != nil || got != nil {
+		t.Fatal("current worker could not acknowledge pruned task")
+	}
+}
