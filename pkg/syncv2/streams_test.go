@@ -9,12 +9,14 @@ import (
 	"github.com/openimsdk/protocol/sdkws"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
 type batchStreamMemory struct {
-	epochs   map[string]uint64
-	accepted int
+	acceptedMu sync.Mutex
+	epochs     map[string]uint64
+	accepted   int
 }
 
 func (s *batchStreamMemory) GetConversationSyncV2Epochs(_ context.Context, ids []string) (map[string]uint64, error) {
@@ -31,7 +33,9 @@ func (s *batchStreamMemory) AcceptConversationSyncV2State(_ context.Context, epo
 	if s.epochs[state.ConversationID] != epoch {
 		return nil, fmt.Errorf("stale epoch")
 	}
+	s.acceptedMu.Lock()
 	s.accepted++
+	s.acceptedMu.Unlock()
 	return state, nil
 }
 

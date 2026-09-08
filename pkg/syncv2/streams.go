@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
+	"github.com/openimsdk/protocol/sdkws"
 )
 
 type BatchStreamStore interface {
@@ -21,7 +24,8 @@ type StreamResults struct {
 	UnavailableIDs []string
 }
 
-// SyncStreams batches state reads while consuming streams sequentially. Epochs
+// SyncStreams batches state reads and bounds chat pulls to four workers.
+// Notifications and commit callbacks remain sequential. Epochs
 // are captured before each network batch, not after it or just before its pull.
 func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateRequest, caps *pb.Capabilities, store BatchStreamStore, commit CommitStream) (*StreamResults, error) {
 	if req == nil || caps == nil || caps.MaxBatchSize <= 0 || caps.MaxRequestBytes <= 0 || store == nil || commit == nil || req.IncludeDetails || req.IncludeSelf && !req.Notifications {
@@ -89,45 +93,117 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			}
 			unavailable[id] = true
 		}
-		for _, id := range ids {
+
+		const (
+			completed int8 = iota + 1
+			pending
+			denied
+		)
+		outcomes := make([]int8, len(ids))
+		var commitMu sync.Mutex
+		serialCommit := func(ctx context.Context, p *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
+			commitMu.Lock()
+			defer commitMu.Unlock()
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			return commit(ctx, p, messages)
+		}
+		scan := func(ctx context.Context, index int) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			id := ids[index]
 			if unavailable[id] {
-				result.UnavailableIDs = append(result.UnavailableIDs, id)
-				advance()
-				continue
+				outcomes[index] = denied
+				return nil
 			}
 			if states[id] == nil || !states[id].Known {
-				result.PendingIDs = append(result.PendingIDs, id)
-				advance()
-				continue
+				outcomes[index] = pending
+				return nil
 			}
 			epoch, ok := epochs[id]
 			if !ok {
 				return fmt.Errorf("sync v2: missing captured epoch")
 			}
-			stream, err := c.syncStreamState(ctx, op, queries[id], caps, store, commit, epoch, states[id])
+			stream, err := c.syncStreamState(ctx, op, queries[id], caps, store, serialCommit, epoch, states[id])
 			if RecoveryFor(err) == Unavailable {
-				result.UnavailableIDs = append(result.UnavailableIDs, id)
-				advance()
-				continue
+				outcomes[index] = denied
+				return nil
 			}
 			if errors.Is(err, ErrStatePending) {
-				result.PendingIDs = append(result.PendingIDs, id)
-				advance()
-				continue
+				outcomes[index] = pending
+				return nil
 			}
 			if err != nil {
 				return err
 			}
 			if len(stream.PendingSeqs) > 0 {
-				result.PendingIDs = append(result.PendingIDs, id)
+				outcomes[index] = pending
 			} else {
+				outcomes[index] = completed
+			}
+			return nil
+		}
+		publish := func(i int) {
+			id := ids[i]
+			switch outcomes[i] {
+			case completed:
 				result.Completed++
+			case pending:
+				result.PendingIDs = append(result.PendingIDs, id)
+			case denied:
+				result.UnavailableIDs = append(result.UnavailableIDs, id)
 			}
 			advance()
 		}
+		if req.Notifications || len(ids) < 2 {
+			for i := range ids {
+				if err := scan(ctx, i); err != nil {
+					return err
+				}
+				publish(i)
+			}
+		} else {
+			workCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			jobs := make(chan int, len(ids))
+			for i := range ids {
+				jobs <- i
+			}
+			close(jobs)
+			var workers sync.WaitGroup
+			var first sync.Once
+			var firstErr error
+			for worker := 0; worker < min(4, len(ids)); worker++ {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					for i := range jobs {
+						if workCtx.Err() != nil {
+							return
+						}
+						if err := scan(workCtx, i); err != nil {
+							first.Do(func() { firstErr = err; cancel() })
+							return
+						}
+					}
+				}()
+			}
+			workers.Wait()
+			if firstErr != nil {
+				return firstErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if !req.Notifications && len(ids) >= 2 {
+			for i := range ids {
+				publish(i)
+			}
+		}
+
 		return nil
 	}
 	size := min(int(caps.MaxBatchSize), 500)
