@@ -29,6 +29,19 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 	if checkpoint == nil || checkpoint.UserID != d.loginUserID || checkpoint.Stage != "details" || response == nil {
 		return fmt.Errorf("sync v2: invalid details checkpoint")
 	}
+	return d.applyConversationSyncV2Details(ctx, checkpoint, checkpoint, response, nil)
+}
+
+// Metadata version, current details and explicit deletions commit atomically.
+// The old legacy UIDList and message tables are not repurposed or erased.
+func (d *DataBase) ApplyConversationSyncV2Metadata(ctx context.Context, before, next *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted []string) error {
+	if before == nil || next == nil || response == nil || before.UserID != d.loginUserID || next.UserID != d.loginUserID || before.Generation != next.Generation || before.SnapshotID != next.SnapshotID || before.VersionID != next.VersionID || next.Version < before.Version || next.Stage != "messages" || before.Stage != "messages" && before.Stage != "catchup" && before.Stage != "ready" {
+		return fmt.Errorf("sync v2: invalid metadata checkpoint")
+	}
+	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted)
+}
+
+func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected, checkpoint *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted []string) error {
 	selected := make(map[string]bool, len(checkpoint.SelectedIDs))
 	for _, id := range checkpoint.SelectedIDs {
 		selected[id] = true
@@ -42,6 +55,7 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 	}
 	next := *checkpoint
 	next.Stage = "messages"
+	next.Revision = expected.Revision + 1
 	next.PendingStateIDs = nil
 	next.UnavailableIDs = append(model_struct.StringArray(nil), response.UnavailableIDs...)
 	states := make(map[string]*pb.State, len(response.States))
@@ -58,17 +72,31 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 		if err := tx.Where("user_id = ?", d.loginUserID).Take(&current).Error; err != nil {
 			return err
 		}
-		if current.Generation != checkpoint.Generation || current.SnapshotID != checkpoint.SnapshotID || current.Stage != "details" || current.VersionID != checkpoint.VersionID || current.Version != checkpoint.Version {
+		if current.Revision != expected.Revision || current.Generation != expected.Generation || current.SnapshotID != expected.SnapshotID || current.Stage != expected.Stage || current.VersionID != expected.VersionID || current.Version != expected.Version {
 			return fmt.Errorf("sync v2: stale details round")
 		}
-		epochs, err := conversationSyncV2Epochs(tx, checkpoint.SelectedIDs)
+		checkIDs := append(append([]string(nil), checkpoint.SelectedIDs...), deleted...)
+		epochs, err := conversationSyncV2Epochs(tx, checkIDs)
 		if err != nil {
 			return err
 		}
-		for _, id := range checkpoint.SelectedIDs {
+		for _, id := range checkIDs {
 			if epochs[id] != checkpoint.StateEpochs[id] {
 				return fmt.Errorf("sync v2: details invalidated by conversation event")
 			}
+		}
+		for _, id := range deleted {
+			if id == "" || selected[id] {
+				return fmt.Errorf("sync v2: inconsistent deleted selection")
+			}
+			if err := tx.Where("conversation_id = ?", id).Delete(&model_struct.LocalConversation{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"epoch": gorm.Expr("epoch + 1"), "state_token": ""})}).Create(&model_struct.LocalConversationSyncV2Stream{ConversationID: id, Epoch: 1}).Error; err != nil {
+				return err
+			}
+		}
+		for _, id := range checkpoint.SelectedIDs {
 			if unavailable[id] {
 				continue
 			}
@@ -116,7 +144,7 @@ func (d *DataBase) SaveConversationSyncV2(ctx context.Context, checkpoint *model
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
 	// UpdateAll persists false/zero/empty values when restarting a failed round.
-	result := d.conn.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true, Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "? = 'snapshot' OR generation = ?", Vars: []interface{}{checkpoint.Stage, checkpoint.Generation}}}}}).Create(checkpoint)
+	result := d.conn.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true, Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "? = 'snapshot' OR (generation = ? AND revision = ?)", Vars: []interface{}{checkpoint.Stage, checkpoint.Generation, checkpoint.Revision}}}}}).Create(checkpoint)
 	if result.Error != nil {
 		return result.Error
 	}

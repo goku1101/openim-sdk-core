@@ -9,6 +9,7 @@ type LocalConversationSyncV2 struct {
 	Stage           string            `gorm:"column:stage"`
 	SnapshotID      string            `gorm:"column:snapshot_id"`
 	Generation      string            `gorm:"column:generation"`
+	Revision        uint64            `gorm:"column:revision"`
 	SelectedIDs     StringArray       `gorm:"column:selected_ids;type:text"`
 	NotificationIDs StringArray       `gorm:"column:notification_ids;type:text"`
 	IncludeSelf     bool              `gorm:"column:include_self"`
