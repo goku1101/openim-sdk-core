@@ -65,10 +65,10 @@ func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs 
 	if err != nil {
 		return nil, err
 	}
-	return c.prepareRoundWithCapabilities(ctx, op, userID, loadedIDs, store, caps)
+	return c.prepareRoundWithCapabilities(ctx, op, userID, loadedIDs, store, caps, nil)
 }
 
-func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID string, loadedIDs []string, store RoundStore, caps *pb.Capabilities) (*Round, error) {
+func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID string, loadedIDs []string, store RoundStore, caps *pb.Capabilities, progress func(int)) (*Round, error) {
 	if !caps.ConversationSyncV2 {
 		return &Round{Enabled: false, Capabilities: caps}, nil
 	}
@@ -112,11 +112,21 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	if err = store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
 		return nil, err
 	}
-	chat, err := c.StatesBatched(ctx, op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.ChatIDs, IncludeDetails: true}, caps)
+	if progress != nil {
+		progress(2)
+	}
+	stateContext := func(start, end int) context.Context {
+		return withStateProgress(ctx, func(done, total int) {
+			if progress != nil && total > 0 {
+				progress(start + (end-start)*done/total)
+			}
+		})
+	}
+	chat, err := c.StatesBatched(stateContext(2, 6), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.ChatIDs, IncludeDetails: true}, caps)
 	if err != nil {
 		return nil, err
 	}
-	notifications, err := c.StatesBatched(ctx, op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.NotificationIDs, Notifications: true, IncludeSelf: selection.IncludeSelf}, caps)
+	notifications, err := c.StatesBatched(stateContext(6, 9), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.NotificationIDs, Notifications: true, IncludeSelf: selection.IncludeSelf}, caps)
 	if err != nil {
 		return nil, err
 	}

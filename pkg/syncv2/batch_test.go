@@ -75,3 +75,33 @@ func TestStatesBatchedSplitsOnlyExplicitSizeErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestStatesBatchProgressFollowsSuccessfulResponses(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			calls := 0
+			var progress [][2]int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls > 1 && len(progress) != calls-1 {
+					t.Error("next request started without completed batch progress")
+				}
+				if fail && calls == 2 {
+					fmt.Fprint(w, `{"errCode":8,"errMsg":"SYNC_V2_READ_CONCURRENCY"}`)
+					return
+				}
+				fmt.Fprint(w, `{"errCode":0,"data":{}}`)
+			}))
+			defer server.Close()
+			ctx := withStateProgress(context.Background(), func(done, total int) { progress = append(progress, [2]int{done, total}) })
+			_, err := NewClient(server.URL, "", server.Client()).StatesBatched(ctx, "op", &pb.StateRequest{UserID: "u", ConversationIDs: []string{"a", "b", "c"}, Notifications: true, IncludeSelf: true}, &pb.Capabilities{MaxBatchSize: 2, MaxRequestBytes: 65536})
+			if fail {
+				if err == nil || len(progress) != 1 || progress[0] != [2]int{2, 4} {
+					t.Fatalf("failed batch advanced progress: %v %v", progress, err)
+				}
+			} else if err != nil || len(progress) != 3 || progress[0] != [2]int{2, 4} || progress[1] != [2]int{3, 4} || progress[2] != [2]int{4, 4} {
+				t.Fatalf("incorrect progress: %v %v", progress, err)
+			}
+		})
+	}
+}

@@ -18,6 +18,16 @@ func (c *Client) StatesBatched(ctx context.Context, op string, req *pb.StateRequ
 		return nil, fmt.Errorf("sync v2: invalid notification options")
 	}
 	out := new(pb.StateResponse)
+	progress, _ := ctx.Value(stateProgressKey{}).(func(int, int))
+	total := len(req.ConversationIDs)
+	if req.IncludeSelf {
+		total++
+	}
+	report := func(done int) {
+		if progress != nil {
+			progress(done, total)
+		}
+	}
 	maxBatch := min(int(caps.MaxBatchSize), 500)
 	maxBytes := min(int(caps.MaxRequestBytes), maxRequestBytes)
 	for start := 0; start < len(req.ConversationIDs); start += maxBatch {
@@ -28,6 +38,7 @@ func (c *Client) StatesBatched(ctx context.Context, op string, req *pb.StateRequ
 		}
 		out.States = append(out.States, result.States...)
 		out.UnavailableIDs = append(out.UnavailableIDs, result.UnavailableIDs...)
+		report(min(start+maxBatch, len(req.ConversationIDs)))
 	}
 	if req.IncludeSelf {
 		result, err := c.statesSplit(ctx, op, &pb.StateRequest{UserID: req.UserID, Notifications: true, IncludeSelf: true}, maxBytes)
@@ -36,6 +47,7 @@ func (c *Client) StatesBatched(ctx context.Context, op string, req *pb.StateRequ
 		}
 		out.States = append(out.States, result.States...)
 		out.UnavailableIDs = append(out.UnavailableIDs, result.UnavailableIDs...)
+		report(total)
 	}
 	return out, nil
 }

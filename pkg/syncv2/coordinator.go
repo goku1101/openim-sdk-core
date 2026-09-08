@@ -76,7 +76,7 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	if err != nil {
 		return nil, err
 	}
-	round, err := c.prepareRoundWithCapabilities(ctx, op, userID, loaded, store, caps)
+	round, err := c.prepareRoundWithCapabilities(ctx, op, userID, loaded, store, caps, report)
 	if err != nil {
 		return nil, err
 	}
