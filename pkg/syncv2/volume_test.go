@@ -12,9 +12,20 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 )
 
-// Mirrors the pinned backend fixture's 50,000 parents and 150 selected chats.
-// This verifies request scope/counts, not device startup latency or traffic.
+// Covers the backend fixture, SDK plan and empty chat selection against 50,000
+// notification parents. This is request-scope evidence, not device performance.
 func TestPrepareRoundLargeAccountRequestScope(t *testing.T) {
+	for _, selected := range []int{150, 5000, 0} {
+		t.Run(fmt.Sprintf("selected_%d", selected), func(t *testing.T) {
+			verifyLargeAccountRequestScope(t, selected)
+		})
+	}
+}
+
+func verifyLargeAccountRequestScope(t *testing.T, selected int) {
+	t.Helper()
+	requestedChats := make(map[string]bool)
+	chatRequests := 0
 	chatIDs, notificationIDs, selfReads, snapshotCreates, releases := 0, 0, 0, 0, 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -26,7 +37,7 @@ func TestPrepareRoundLargeAccountRequestScope(t *testing.T) {
 			if req.SnapshotID == "" {
 				snapshotCreates++
 			}
-			total := 150
+			total := selected
 			if req.Scope == "notifications" {
 				total = 50000
 			}
@@ -54,7 +65,9 @@ func TestPrepareRoundLargeAccountRequestScope(t *testing.T) {
 			var req pb.StateRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			if len(req.ConversationIDs) > 500 {
-				t.Fatal("batch limit exceeded")
+				t.Error("batch limit exceeded")
+				w.WriteHeader(400)
+				return
 			}
 			if req.Notifications {
 				notificationIDs += len(req.ConversationIDs)
@@ -63,6 +76,16 @@ func TestPrepareRoundLargeAccountRequestScope(t *testing.T) {
 				}
 			} else {
 				chatIDs += len(req.ConversationIDs)
+				chatRequests++
+				if !req.IncludeDetails {
+					t.Error("chat state omitted authoritative details")
+				}
+				for _, id := range req.ConversationIDs {
+					if requestedChats[id] {
+						t.Errorf("duplicate chat state request: %s", id)
+					}
+					requestedChats[id] = true
+				}
 				if len(req.ConversationIDs) == 0 {
 					t.Error("unbounded chat request")
 				}
@@ -84,7 +107,18 @@ func TestPrepareRoundLargeAccountRequestScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(round.Selection.ChatIDs) != 150 || chatIDs != 150 || notificationIDs != 50000 || selfReads != 1 || snapshotCreates != 1 || releases != 1 {
+	if len(round.Selection.ChatIDs) != selected || chatIDs != selected || notificationIDs != 50000 || selfReads != 1 || snapshotCreates != 1 || releases != 1 {
 		t.Fatalf("scope mismatch: chats=%d notifications=%d self=%d creates=%d releases=%d", chatIDs, notificationIDs, selfReads, snapshotCreates, releases)
+	}
+	for i := 0; i < selected; i++ {
+		if !requestedChats[fmt.Sprintf("sg_fixture_%d", i)] {
+			t.Fatalf("missing selected chat %d", i)
+		}
+	}
+	if selected == 0 && chatRequests != 0 {
+		t.Fatalf("empty selection made %d chat requests", chatRequests)
+	}
+	if len(requestedChats) != selected {
+		t.Fatalf("requested chats outside selection: %d", len(requestedChats))
 	}
 }
