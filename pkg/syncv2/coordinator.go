@@ -28,6 +28,7 @@ type CoordinatorHooks struct {
 	ReadMetadata   func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error)
 	Commit         CommitStream
 	Publish        func(context.Context, *model_struct.LocalConversationSyncV2) error
+	Progress       func(int)
 }
 
 type SyncResult struct {
@@ -57,6 +58,20 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	if !caps.ConversationSyncV2 {
 		return &SyncResult{Enabled: false, Capabilities: caps}, nil
 	}
+	lastProgress := 0
+	report := func(value int) {
+		if hooks.Progress != nil && value > lastProgress {
+			lastProgress = value
+			hooks.Progress(value)
+		}
+	}
+	streamContext := func(start, end int) context.Context {
+		return withStreamProgress(ctx, func(done, total int) {
+			if total > 0 {
+				report(start + (end-start)*done/total)
+			}
+		})
+	}
 	loaded, err := store.GetAllConversationIDList(ctx)
 	if err != nil {
 		return nil, err
@@ -73,22 +88,29 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	if !round.Enabled {
 		return result, nil
 	}
+	report(10)
 	if err = hooks.PrepareRelated(ctx); err != nil {
 		return nil, err
 	}
+	report(20)
 	checkpoint := round.Checkpoint
 	// The second pass also catches new notification parents and pinned chats
 	// discovered by metadata catchup. Online pushes continue after this round.
 	caughtUp := false
 	for pass := 0; pass < 3; pass++ {
+		notificationStart := [3]int{20, 60, 90}[pass]
+		notificationEnd := [3]int{30, 70, 93}[pass]
+		chatStart := [3]int{35, 75, 95}[pass]
+		chatEnd := [3]int{60, 90, 98}[pass]
 		checkedParents := make(map[string]bool, len(checkpoint.NotificationIDs))
 		for _, id := range checkpoint.NotificationIDs {
 			checkedParents[id] = true
 		}
-		result.Notifications, err = c.SyncStreams(ctx, op, &pb.StateRequest{UserID: userID, ConversationIDs: checkpoint.NotificationIDs, Notifications: true, IncludeSelf: checkpoint.IncludeSelf}, round.Capabilities, store, hooks.Commit)
+		result.Notifications, err = c.SyncStreams(streamContext(notificationStart, notificationEnd), op, &pb.StateRequest{UserID: userID, ConversationIDs: checkpoint.NotificationIDs, Notifications: true, IncludeSelf: checkpoint.IncludeSelf}, round.Capabilities, store, hooks.Commit)
 		if err != nil {
 			return nil, err
 		}
+		report(notificationEnd)
 		// A notification handler may itself have refreshed metadata in the queue.
 		// Read its committed revision instead of publishing the prepared copy.
 		checkpoint, err = store.GetConversationSyncV2(ctx)
@@ -106,10 +128,12 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 		if err != nil {
 			return nil, err
 		}
-		result.Chats, err = c.SyncStreams(ctx, op, &pb.StateRequest{UserID: userID, ConversationIDs: checkpoint.SelectedIDs}, round.Capabilities, store, hooks.Commit)
+		report(chatStart)
+		result.Chats, err = c.SyncStreams(streamContext(chatStart, chatEnd), op, &pb.StateRequest{UserID: userID, ConversationIDs: checkpoint.SelectedIDs}, round.Capabilities, store, hooks.Commit)
 		if err != nil {
 			return nil, err
 		}
+		report(chatEnd)
 		newParents := false
 		for _, id := range checkpoint.NotificationIDs {
 			if !checkedParents[id] {
@@ -134,5 +158,6 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 		return nil, err
 	}
 	result.Checkpoint = &next
+	report(99)
 	return result, nil
 }

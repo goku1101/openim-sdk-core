@@ -107,7 +107,14 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 			}))
 			defer server.Close()
 			client := syncv2.NewClient(server.URL, "", server.Client())
+			var progress []int
 			result, err := client.Synchronize(ctx, "op", "u", database, syncv2.CoordinatorHooks{
+				Progress: func(value int) {
+					if value >= 100 || len(progress) > 0 && value <= progress[len(progress)-1] {
+						t.Errorf("invalid progress: %v -> %d", progress, value)
+					}
+					progress = append(progress, value)
+				},
 				PrepareRelated: func(context.Context) error { return nil },
 				ReadMetadata: func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error) {
 					metadataReads++
@@ -138,6 +145,15 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 					return nil
 				},
 			})
+			if len(progress) < 3 {
+				t.Fatalf("missing intermediate progress: %v", progress)
+			}
+			if err == nil && progress[len(progress)-1] != 99 {
+				t.Fatalf("successful round not projected: %v", progress)
+			}
+			if err != nil && progress[len(progress)-1] >= 99 {
+				t.Fatalf("failed round reported complete: %v", progress)
+			}
 			checkpoint, readErr := database.GetConversationSyncV2(ctx)
 			if readErr != nil {
 				t.Fatal(readErr)

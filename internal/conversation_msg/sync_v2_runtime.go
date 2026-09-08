@@ -85,7 +85,14 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
 	started := false
+	lastProgress := 1
 	hooks := syncv2.CoordinatorHooks{
+		Progress: func(value int) {
+			if ctx.Err() == nil && value > lastProgress && value < 100 {
+				lastProgress = value
+				c.ConversationListener().OnSyncServerProgress(value)
+			}
+		},
 		Negotiated: func(ctx context.Context, caps *pb.Capabilities) error {
 			if err := ctx.Err(); err != nil {
 				return err

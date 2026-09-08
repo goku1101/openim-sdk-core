@@ -70,11 +70,18 @@ func TestSyncStreamsBatchesFiftyThousandNotifications(t *testing.T) {
 		ids[i] = fmt.Sprintf("sg_%d", i)
 	}
 	client := NewClient(server.URL, "", server.Client())
-	result, err := client.SyncStreams(context.Background(), "op", &pb.StateRequest{UserID: "u", ConversationIDs: ids, Notifications: true, IncludeSelf: true}, &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, store, func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error {
+	progressCalls := 0
+	ctx := withStreamProgress(context.Background(), func(done, total int) {
+		progressCalls++
+		if done != progressCalls || total != 50001 || store.accepted != done {
+			t.Errorf("progress before consumption: done=%d total=%d accepted=%d", done, total, store.accepted)
+		}
+	})
+	result, err := client.SyncStreams(ctx, "op", &pb.StateRequest{UserID: "u", ConversationIDs: ids, Notifications: true, IncludeSelf: true}, &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, store, func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error {
 		t.Fatal("no messages to commit")
 		return nil
 	})
-	if err != nil || requests != 101 || store.accepted != 50001 || result.Completed != 50001 {
+	if err != nil || requests != 101 || store.accepted != 50001 || result.Completed != 50001 || progressCalls != 50001 {
 		t.Fatalf("batching lost: result=%+v requests=%d accepted=%d err=%v", result, requests, store.accepted, err)
 	}
 }

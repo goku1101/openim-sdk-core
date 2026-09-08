@@ -28,6 +28,17 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 		return nil, fmt.Errorf("sync v2: invalid stream batch")
 	}
 	result := new(StreamResults)
+	processed, total := 0, len(req.ConversationIDs)
+	if req.IncludeSelf {
+		total++
+	}
+	progress, _ := ctx.Value(streamProgressKey{}).(func(int, int))
+	advance := func() {
+		processed++
+		if progress != nil {
+			progress(processed, total)
+		}
+	}
 	consume := func(parents []string, self bool) error {
 		queries := make(map[string]*pb.PullRequest, len(parents)+1)
 		ids := make([]string, 0, len(parents)+1)
@@ -84,10 +95,12 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			}
 			if unavailable[id] {
 				result.UnavailableIDs = append(result.UnavailableIDs, id)
+				advance()
 				continue
 			}
 			if states[id] == nil || !states[id].Known {
 				result.PendingIDs = append(result.PendingIDs, id)
+				advance()
 				continue
 			}
 			epoch, ok := epochs[id]
@@ -97,6 +110,7 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			stream, err := c.syncStreamState(ctx, op, queries[id], caps, store, commit, epoch, states[id])
 			if errors.Is(err, ErrStatePending) {
 				result.PendingIDs = append(result.PendingIDs, id)
+				advance()
 				continue
 			}
 			if err != nil {
@@ -107,6 +121,7 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			} else {
 				result.Completed++
 			}
+			advance()
 		}
 		return nil
 	}
