@@ -105,8 +105,9 @@ type LoginMgr struct {
 
 	justOnceFlag bool
 
-	w           sync.Mutex
-	loginStatus int
+	w             sync.Mutex
+	loginStatus   int
+	appBackground appBackgroundSync
 
 	groupListener        open_im_sdk_callback.OnGroupListener
 	friendshipListener   open_im_sdk_callback.OnFriendshipListener
@@ -423,6 +424,7 @@ func (u *LoginMgr) initResources() {
 	u.conversationCh = make(chan common.Cmd2Value, convChanLen)
 	u.msgSyncerCh = make(chan common.Cmd2Value, 1000)
 	u.loginMgrCh = make(chan common.Cmd2Value, 1)
+	u.appBackground.reset()
 	u.longConnMgr = interaction.NewLongConnMgr(u.ctx, u.connListener, u.userOnlineStatusChange, u.msgSyncerCh, u.loginMgrCh)
 	u.ctx = ccontext.WithApiErrCode(u.ctx, &apiErrCallback{loginMgrCh: u.loginMgrCh, listener: u.connListener})
 	u.setLoginStatus(LogoutStatus)
@@ -469,19 +471,13 @@ func (u *LoginMgr) logout(ctx context.Context, isTokenValid bool) error {
 }
 
 func (u *LoginMgr) setAppBackgroundStatus(ctx context.Context, isBackground bool) error {
-	u.longConnMgr.SetBackground(isBackground)
-
-	var resp sdkws.SetAppBackgroundStatusResp
-	err := u.longConnMgr.SendReqWaitResp(ctx, &sdkws.SetAppBackgroundStatusReq{UserID: u.loginUserID, IsBackground: isBackground}, constant.SetBackgroundStatus, &resp)
-	if err != nil {
-		return err
-	} else {
-		if !isBackground {
-			_ = common.TriggerCmdWakeUpDataSync(ctx, u.msgSyncerCh)
-		}
-
-		return nil
-	}
+	return u.appBackground.update(isBackground, func() error {
+		u.longConnMgr.SetBackground(isBackground)
+		var resp sdkws.SetAppBackgroundStatusResp
+		return u.longConnMgr.SendReqWaitResp(ctx, &sdkws.SetAppBackgroundStatusReq{UserID: u.loginUserID, IsBackground: isBackground}, constant.SetBackgroundStatus, &resp)
+	}, func() error {
+		return common.TriggerCmdWakeUpDataSync(ctx, u.msgSyncerCh)
+	})
 }
 
 func (u *LoginMgr) LongConnMgr() *interaction.LongConnMgr {
