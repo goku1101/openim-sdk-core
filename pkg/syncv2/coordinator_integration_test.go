@@ -25,8 +25,10 @@ import (
 )
 
 func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T) {
-	for _, name := range []string{"catchup", "consumer-failure", "late-notification-parent", "moving-notification-parents"} {
+	for _, name := range []string{"empty-chat-selection", "catchup", "consumer-failure", "late-notification-parent", "moving-notification-parents"} {
 		t.Run(name, func(t *testing.T) {
+			emptyChats := name == "empty-chat-selection"
+			chatRequests, notificationRequests := 0, 0
 			fail := name == "consumer-failure"
 			movingParents := name == "moving-notification-parents"
 			lateParent := name == "late-notification-parent"
@@ -66,13 +68,23 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 				case "/conversation/sync_snapshot":
 					var req pb.SnapshotRequest
 					_ = json.NewDecoder(r.Body).Decode(&req)
-					data = &pb.SnapshotResponse{SnapshotID: "snapshot", Scope: req.Scope, Mode: "full", PolicyVersion: syncv2.PolicyVersion, ConversationIDs: []string{"si_u_v"}, Total: 1, IncludeSelf: req.Scope == "notifications", VersionID: "metadata", Version: 1}
+					response := &pb.SnapshotResponse{SnapshotID: "snapshot", Scope: req.Scope, Mode: "full", PolicyVersion: syncv2.PolicyVersion, ConversationIDs: []string{"si_u_v"}, Total: 1, IncludeSelf: req.Scope == "notifications", VersionID: "metadata", Version: 1}
+					if emptyChats && req.Scope == "chat" {
+						response.ConversationIDs = nil
+						response.Total = 0
+					}
+					data = response
 				case "/conversation/sync_snapshot_release":
 					fmt.Fprint(w, `{"errCode":0}`)
 					return
 				case "/msg/sync_seqs_v2":
 					var req pb.StateRequest
 					_ = json.NewDecoder(r.Body).Decode(&req)
+					if req.Notifications || req.IncludeSelf {
+						notificationRequests++
+					} else {
+						chatRequests++
+					}
 					response := &pb.StateResponse{}
 					for _, id := range req.ConversationIDs {
 						if req.Notifications {
@@ -90,8 +102,8 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 				case "/msg/sync_messages_v2":
 					var req pb.PullRequest
 					_ = json.NewDecoder(r.Body).Decode(&req)
-					if req.Notifications {
-						t.Error("empty notification stream pulled")
+					if req.Notifications || emptyChats {
+						t.Error("empty stream pulled")
 					}
 					response := &pb.PullResponse{State: state(req.ConversationID, true)}
 					for _, seq := range req.Seqs {
@@ -138,6 +150,12 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 					published = true
 					if lateParent && !lateParentChecked {
 						return fmt.Errorf("new notification parent skipped before ready")
+					}
+					if emptyChats {
+						if chatRequests != 0 || notificationRequests == 0 {
+							return fmt.Errorf("empty round scope violated: chats=%d notifications=%d", chatRequests, notificationRequests)
+						}
+						return nil
 					}
 					if _, err := database.GetMessageBySeq(ctx, "si_u_v", int64(expectedReads)); err != nil {
 						return fmt.Errorf("latest message missing before publish: %w", err)
