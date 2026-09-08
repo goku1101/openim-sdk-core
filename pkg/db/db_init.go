@@ -159,6 +159,11 @@ func (d *DataBase) initDB(ctx context.Context, logLevel int) error {
 	if err = d.versionDataMigrate(ctx); err != nil {
 		return err
 	}
+	// The fork can introduce V2 while retaining the upstream SDK version string.
+	// Migrate this independent table for both fresh and existing installations.
+	if err = db.AutoMigrate(&model_struct.LocalConversationSyncV2{}); err != nil {
+		return err
+	}
 
 	//if err := db.Table(constant.SuperGroupTableName).AutoMigrate(superGroup); err != nil {
 	//	return err

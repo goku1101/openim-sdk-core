@@ -1,0 +1,42 @@
+# 会话同步 V2：Core 实现记录
+
+日期：2026-09-08。当前完成协议请求、快照准备和原生数据库检查点，**尚未接入登录、重连、消息拉取等运行入口，也未生成支持 V2 的 Android/iOS 二进制**。
+
+## 契约来源
+
+- 服务端：`onecode/openim-server`，固定提交 `dafe810da6405162a23066462728d4f8821db455`。
+- 策略：`conversation-sync-v2.2`。
+- `pb/sync.proto` 和 `pb/sync.pb.go` 原样取自该提交；保留服务端原始 `go_package` 描述符，当前客户端以本模块的 `pkg/syncv2/pb` 导入生成类型。这里仅使用 HTTP，不使用服务端 gRPC stub。
+- 外部协议：`github.com/openimsdk/protocol v0.0.73-alpha.19`；Protobuf runtime `v1.36.2`。
+- Core 基线：`v3.8.3-patch.15` / `d6e0b549db904d0327d76ef7c9c283203879a095`。
+
+## 已实现与验证
+
+- 五类 HTTP 请求保留 token/operationID 鉴权头、服务端错误码及原因；不记录凭据或消息载荷。默认请求超时 70 秒，覆盖服务端 60 秒快照构建窗口；调用方上下文可提前取消。
+- 请求采用后端 `a2r` 实际使用的 Go JSON 编码，避免 Protobuf JSON 把 int64 序号编码成字符串后导致服务端绑定失败。业务 ID 始终为字符串，序号使用 Go int64 保持精度。
+- 只有明确的能力响应才能选择协议；空响应、HTTP 404、Redis 故障不进入旧协议。
+- chat/notifications 复用一个快照，分别分页。元数据、游标和完整性校验失败不发布半份集合。取消时仍尝试释放；释放失败通过诊断字段返回，TTL 兜底，不导致已完整读取的快照重建。
+- 状态请求按协商数量/字节上限分批，仅对明确的容量错误缩批；空聊天请求跳过；自通知单独请求一次。
+- 准备阶段保留设备已加载会话，错误分类不执行删除、无限重试或自动降级。
+- 独立 SQLite 检查点表保存策略、阶段、选择集合、通知集合和快照基准版本。现有数据库也执行迁移，不覆盖旧 `LocalVersionSync.UIDList`。快照未完整读取时重建；完整读取后允许详情/消息阶段幂等重放。
+- `PrepareRound` 最多写到 `details` 阶段，不能代表详情、消息落库或同步完成。
+- 合成 5 万会话用例验证只请求 150 个选中聊天的详情，仍遍历全部通知父 ID；这不是大账号真机性能验收。
+
+验证命令（Go 1.24）：
+
+```sh
+go test ./pkg/syncv2 -race -count=1
+go test ./pkg/db -run '^TestSyncV2' -count=1
+go test ./internal/conversation_msg ./internal/interaction -run '^$'
+git diff --check
+```
+
+## 后续必须完成
+
+1. 把同一轮模式和检查点接入 Conversation/MsgSyncer，按阶段确认落库，错误不能触发成功回调。
+2. 约束首次、重连、唤醒、手动同步、历史和最新消息等所有入口，阻止旧 WS 全量路径绕过选择集合。
+3. 详情 upsert 保留草稿/历史；known=false、unresolvedSeqs 和 unavailableIDs 分别保留待校验状态，不伪造删除或完整性。
+4. 通知流父 ID 映射、独立消费进度、权限/清空事件在途失效、增量追赶，以及有界重试和重启恢复。
+5. 生成并接入双端 Core 产物，验证新设备、大账号、旧设备、线路切换和旧协议兼容。当前运行中的 App 尚未启用本模块。
+
+测试环境鉴权入口已连通，图形验证码校验未通过，尚无真实大账号 V2 接口或 WSS 验收结果。凭据不进入本仓库。
