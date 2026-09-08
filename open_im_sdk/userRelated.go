@@ -358,6 +358,7 @@ func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
 	u.setListener(ctx)
 	if u.conversation.ConfigureConversationSyncV2(ctx) {
 		u.msgSyncer.SetConversationSyncV2(u.conversation.SynchronizeConversationV2)
+		u.msgSyncer.SetConversationSyncV2Push(u.conversation.ProcessConversationSyncV2Push)
 	}
 
 	u.run(ctx)

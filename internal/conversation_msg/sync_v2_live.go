@@ -16,6 +16,10 @@ import (
 // already present, including self-send acknowledgements. It does not add unread
 // counts: V2 authoritative state owns that value.
 func (c *Conversation) consumeConversationSyncV2Live(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
+	return c.consumeConversationSyncV2LiveSelected(ctx, progress, messages, nil)
+}
+
+func (c *Conversation) consumeConversationSyncV2LiveSelected(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData, notifyIDs map[string]bool) error {
 	if progress == nil {
 		return fmt.Errorf("sync v2: missing live progress")
 	}
@@ -43,7 +47,7 @@ func (c *Conversation) consumeConversationSyncV2Live(ctx context.Context, progre
 		}
 		var incoming sdk_struct.NewMsgList
 		for _, message := range messages {
-			if seen[message.ClientMsgID] || message.Status >= constant.MsgStatusHasDeleted || !utils.GetSwitchFromOptions(message.Options, constant.IsConversationUpdate) {
+			if notifyIDs != nil && !notifyIDs[message.ClientMsgID] || seen[message.ClientMsgID] || message.Status >= constant.MsgStatusHasDeleted || !utils.GetSwitchFromOptions(message.Options, constant.IsConversationUpdate) {
 				continue
 			}
 			seen[message.ClientMsgID] = true

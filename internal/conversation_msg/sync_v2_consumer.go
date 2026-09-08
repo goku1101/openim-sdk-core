@@ -61,16 +61,7 @@ func (c *Conversation) consumeConversationSyncV2(ctx context.Context, progress *
 			return err
 		}
 		if message.Status < constant.MsgStatusHasDeleted {
-			switch {
-			case message.ContentType > constant.FriendNotificationBegin && message.ContentType < constant.FriendNotificationEnd:
-				err = c.relation.DoNotification(ctx, message)
-			case message.ContentType > constant.UserNotificationBegin && message.ContentType < constant.UserNotificationEnd:
-				err = c.user.DoNotification(ctx, message)
-			case message.ContentType > constant.GroupNotificationBegin && message.ContentType < constant.GroupNotificationEnd:
-				err = c.group.DoNotification(ctx, message)
-			default:
-				err = c.DoNotification(ctx, message)
-			}
+			err = c.dispatchConversationSyncV2Notification(ctx, message)
 			if err != nil {
 				return err
 			}
@@ -78,4 +69,18 @@ func (c *Conversation) consumeConversationSyncV2(ctx context.Context, progress *
 		resolved = append(resolved, message.Seq)
 	}
 	return store.CommitConversationSyncV2Notifications(ctx, progress.Epoch, progress, resolved)
+}
+
+func (c *Conversation) dispatchConversationSyncV2Notification(ctx context.Context, message *sdkws.MsgData) (err error) {
+	switch {
+	case message.ContentType > constant.FriendNotificationBegin && message.ContentType < constant.FriendNotificationEnd:
+		err = c.relation.DoNotification(ctx, message)
+	case message.ContentType > constant.UserNotificationBegin && message.ContentType < constant.UserNotificationEnd:
+		err = c.user.DoNotification(ctx, message)
+	case message.ContentType > constant.GroupNotificationBegin && message.ContentType < constant.GroupNotificationEnd:
+		err = c.group.DoNotification(ctx, message)
+	default:
+		err = c.DoNotification(ctx, message)
+	}
+	return err
 }
