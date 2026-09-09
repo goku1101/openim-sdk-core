@@ -27,7 +27,7 @@ type CoordinatorHooks struct {
 	PrepareRelated func(context.Context) error
 	ReadMetadata   func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error)
 	Commit         CommitStream
-	Publish        func(context.Context, *model_struct.LocalConversationSyncV2) error
+	Publish        func(context.Context, *model_struct.LocalConversationSyncV2, func(int, int)) error
 	Progress       func(int)
 }
 
@@ -98,10 +98,10 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	// discovered by metadata catchup. Online pushes continue after this round.
 	caughtUp := false
 	for pass := 0; pass < 3; pass++ {
-		notificationStart := [3]int{20, 60, 90}[pass]
-		notificationEnd := [3]int{30, 70, 93}[pass]
-		chatStart := [3]int{35, 75, 95}[pass]
-		chatEnd := [3]int{60, 90, 98}[pass]
+		notificationStart := [3]int{20, 55, 80}[pass]
+		notificationEnd := [3]int{30, 65, 83}[pass]
+		chatStart := [3]int{30, 65, 83}[pass]
+		chatEnd := [3]int{55, 80, 86}[pass]
 		checkedParents := make(map[string]bool, len(checkpoint.NotificationIDs))
 		for _, id := range checkpoint.NotificationIDs {
 			checkedParents[id] = true
@@ -149,7 +149,14 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	if !caughtUp {
 		return nil, ErrCatchupPending
 	}
-	if err = hooks.Publish(ctx, checkpoint); err != nil {
+	// Projection may take multiple batches on an existing large account. Report
+	// only committed batches, reserving 99 for the durable ready checkpoint.
+	publishStart := lastProgress
+	if err = hooks.Publish(ctx, checkpoint, func(done, total int) {
+		if total > 0 {
+			report(publishStart + (98-publishStart)*done/total)
+		}
+	}); err != nil {
 		return nil, err
 	}
 	next := *checkpoint

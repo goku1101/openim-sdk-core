@@ -153,7 +153,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		},
 		ReadMetadata: c.getIncrementalConversationFromServer,
 		Commit:       c.ConsumeConversationSyncV2,
-		Publish:      c.publishConversationSyncV2,
+		Publish:      c.publishConversationSyncV2WithProgress,
 	}
 	var result *syncv2.SyncResult
 	var err error
@@ -251,6 +251,10 @@ func (c *Conversation) refreshConversationSyncV2Metadata(ctx context.Context) er
 }
 
 func (c *Conversation) publishConversationSyncV2(ctx context.Context, checkpoint *model_struct.LocalConversationSyncV2) error {
+	return c.publishConversationSyncV2WithProgress(ctx, checkpoint, nil)
+}
+
+func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context, checkpoint *model_struct.LocalConversationSyncV2, progress func(int, int)) error {
 	return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
 		epochs, err := c.syncV2.store.GetConversationSyncV2Epochs(ctx, checkpoint.SelectedIDs)
 		if err != nil {
@@ -282,6 +286,9 @@ func (c *Conversation) publishConversationSyncV2(ctx context.Context, checkpoint
 			}
 			for _, conversation := range conversations {
 				c.maxSeqRecorder.Set(conversation.ConversationID, conversation.MaxSeq)
+			}
+			if progress != nil {
+				progress(min(start+300, len(checkpoint.SelectedIDs)), len(checkpoint.SelectedIDs))
 			}
 		}
 		return nil

@@ -146,8 +146,22 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 					}
 					return consumer.ConsumeConversationSyncV2(ctx, p, m)
 				},
-				Publish: func(ctx context.Context, p *model_struct.LocalConversationSyncV2) error {
+				Publish: func(ctx context.Context, p *model_struct.LocalConversationSyncV2, advance func(int, int)) error {
 					published = true
+					beforePublish := progress[len(progress)-1]
+					advance(1, 3)
+					firstBatch := progress[len(progress)-1]
+					if firstBatch <= beforePublish || firstBatch >= 99 {
+						return fmt.Errorf("durable projection batch did not advance progress: %v", progress)
+					}
+					advance(2, 3)
+					if progress[len(progress)-1] <= firstBatch || progress[len(progress)-1] >= 99 {
+						return fmt.Errorf("second projection batch did not advance progress: %v", progress)
+					}
+					advance(3, 3)
+					if progress[len(progress)-1] >= 99 {
+						return fmt.Errorf("projection claimed ready before checkpoint commit: %v", progress)
+					}
 					if lateParent && !lateParentChecked {
 						return fmt.Errorf("new notification parent skipped before ready")
 					}

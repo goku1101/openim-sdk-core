@@ -87,7 +87,7 @@ func TestPinnedServerHTTPReadyFixture(t *testing.T) {
 			return &conversation.GetIncrementalConversationResp{Version: v, VersionID: id}, nil
 		},
 		Commit: consumer.ConsumeConversationSyncV2,
-		Publish: func(ctx context.Context, checkpoint *model_struct.LocalConversationSyncV2) error {
+		Publish: func(ctx context.Context, checkpoint *model_struct.LocalConversationSyncV2, _ func(int, int)) error {
 			if checkpoint.Stage == "ready" {
 				return fmt.Errorf("ready before publish")
 			}
