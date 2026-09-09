@@ -2,6 +2,10 @@ package syncv2
 
 import (
 	"errors"
+	"net"
+	"net/url"
+	"os"
+	"syscall"
 	"testing"
 )
 
@@ -37,5 +41,15 @@ func TestRecoveryRequiresMatchingCodeAndReason(t *testing.T) {
 		if got := RecoveryFor(err); got != Stop {
 			t.Fatalf("generic failure changes protocol: %v", got)
 		}
+	}
+}
+
+func TestRecoveryRetriesWrappedConnectionReset(t *testing.T) {
+	err := &url.Error{Op: "Post", URL: "https://fixture.invalid/conversation/sync_capabilities", Err: &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}}
+	if got := RecoveryFor(err); got != Retry {
+		t.Fatalf("connection reset: got %v want Retry", got)
+	}
+	if got := RecoveryFor(errors.New("connection reset by peer")); got != Stop {
+		t.Fatalf("untyped error must not be retried: %v", got)
 	}
 }

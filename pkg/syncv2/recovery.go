@@ -4,6 +4,7 @@ import (
 	"errors"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"net"
+	"syscall"
 )
 
 type Recovery uint8
@@ -32,6 +33,9 @@ func RecoveryFor(err error) Recovery {
 	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
+		if errors.Is(err, syscall.ECONNRESET) {
+			return Retry
+		}
 		var networkError net.Error
 		if errors.As(err, &networkError) && networkError.Timeout() {
 			return Retry

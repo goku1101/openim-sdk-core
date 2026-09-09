@@ -4,9 +4,12 @@ package conversation_msg
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"syscall"
 	"testing"
 
 	"github.com/openimsdk/openim-sdk-core/v3/internal/interaction"
@@ -15,6 +18,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/protocol/sdkws"
 )
 
@@ -90,6 +94,64 @@ func TestSyncV2RuntimeFailureNeverFinishesOrSelectsLegacy(t *testing.T) {
 				if (scenario == "snapshot-error" || scenario == "mode-changed") && listener.starts != 1 {
 					t.Fatal("negotiated V2 did not emit one start")
 				}
+			}
+		})
+	}
+}
+
+type syncV2ResetTransport struct {
+	calls  int
+	resets int
+	base   http.RoundTripper
+}
+
+func (t *syncV2ResetTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.calls++
+	if t.calls <= t.resets {
+		return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+	}
+	return t.base.RoundTrip(r)
+}
+
+func TestSyncV2RuntimeBoundsConnectionResetRetries(t *testing.T) {
+	for _, resets := range []int{1, 2} {
+		t.Run(fmt.Sprint(resets), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/conversation/sync_capabilities" {
+					fmt.Fprint(w, `{"errCode":0,"data":{"conversationSyncV2":true,"policyVersion":"conversation-sync-v2.2","maxBatchSize":500,"maxPageSize":500,"maxRequestBytes":65536,"snapshotTTLSeconds":600}}`)
+					return
+				}
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer server.Close()
+			config := &ccontext.GlobalConfig{UserID: "u"}
+			config.ApiAddr = server.URL
+			ctx := ccontext.WithInfo(context.Background(), config)
+			database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close(ctx)
+			c := NewConversation(ctx, &interaction.LongConnMgr{}, database, make(chan common.Cmd2Value, 10), nil, nil, nil, nil, nil)
+			listener := &syncV2Listener{}
+			c.SetConversationListener(func() open_im_sdk_callback.OnConversationListener { return listener })
+			c.ConfigureConversationSyncV2(ctx)
+			transport := &syncV2ResetTransport{resets: resets, base: server.Client().Transport}
+			c.syncV2.client = syncv2.NewClient(server.URL, "fixture", &http.Client{Transport: transport})
+			handled, err := c.SynchronizeConversationV2(ctx, false)
+			if !handled || err == nil || listener.failures != 1 || listener.finishes != 0 || c.syncV2.mode.Load() == syncV2Legacy {
+				t.Fatalf("invalid outcome: %v %v %+v", handled, err, listener)
+			}
+			if resets == 1 {
+				if transport.calls != 3 || listener.starts != 1 {
+					t.Fatalf("did not resume capability negotiation: calls=%d starts=%d", transport.calls, listener.starts)
+				}
+				var status *syncv2.HTTPError
+				if !errors.As(err, &status) || status.StatusCode != http.StatusForbidden {
+					t.Fatal(err)
+				}
+			} else if transport.calls != 2 || listener.starts != 0 || !errors.Is(err, syscall.ECONNRESET) {
+				t.Fatalf("retry not bounded: calls=%d starts=%d err=%v", transport.calls, listener.starts, err)
 			}
 		})
 	}
