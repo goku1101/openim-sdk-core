@@ -191,6 +191,9 @@ func (u *LoginMgr) ImConfig() sdk_struct.IMConfig {
 }
 
 func (u *LoginMgr) Conversation() *conv.Conversation {
+	if u == nil {
+		return nil
+	}
 	return u.conversation
 }
 

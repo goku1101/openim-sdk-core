@@ -221,7 +221,8 @@ func call(callback open_im_sdk_callback.Base, operationID string, fn any, args .
 	go func() {
 		res, err := call_(operationID, fn, args...)
 		if err != nil {
-			if code, ok := err.(errs.CodeError); ok {
+			var code errs.CodeError
+			if errors.As(err, &code) {
 				callback.OnError(int32(code.Code()), code.Error())
 			} else {
 				callback.OnError(sdkerrs.UnknownCode, fmt.Sprintf("error %T not implement CodeError: %s", err, err))
