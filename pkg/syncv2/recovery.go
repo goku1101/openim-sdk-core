@@ -3,7 +3,9 @@ package syncv2
 import (
 	"errors"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
+	"io"
 	"net"
+	"net/url"
 	"syscall"
 )
 
@@ -34,6 +36,10 @@ func RecoveryFor(err error) Recovery {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		if errors.Is(err, syscall.ECONNRESET) {
+			return Retry
+		}
+		var transportError *url.Error
+		if errors.As(err, &transportError) && errors.Is(transportError.Err, io.ErrUnexpectedEOF) {
 			return Retry
 		}
 		var networkError net.Error

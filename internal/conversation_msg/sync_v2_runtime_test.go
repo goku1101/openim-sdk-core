@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,20 +101,30 @@ func TestSyncV2RuntimeFailureNeverFinishesOrSelectsLegacy(t *testing.T) {
 }
 
 type syncV2ResetTransport struct {
-	calls  int
-	resets int
-	base   http.RoundTripper
+	failure error
+	calls   int
+	resets  int
+	base    http.RoundTripper
 }
 
 func (t *syncV2ResetTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	t.calls++
 	if t.calls <= t.resets {
-		return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+		return nil, t.failure
 	}
 	return t.base.RoundTrip(r)
 }
 
 func TestSyncV2RuntimeBoundsConnectionResetRetries(t *testing.T) {
+	testSyncV2BoundedTransportRetries(t, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET})
+}
+
+func TestSyncV2RuntimeBoundsUnexpectedEOFRetries(t *testing.T) {
+	testSyncV2BoundedTransportRetries(t, io.ErrUnexpectedEOF)
+}
+
+func testSyncV2BoundedTransportRetries(t *testing.T, failure error) {
+	t.Helper()
 	for _, resets := range []int{1, 2} {
 		t.Run(fmt.Sprint(resets), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +147,7 @@ func TestSyncV2RuntimeBoundsConnectionResetRetries(t *testing.T) {
 			listener := &syncV2Listener{}
 			c.SetConversationListener(func() open_im_sdk_callback.OnConversationListener { return listener })
 			c.ConfigureConversationSyncV2(ctx)
-			transport := &syncV2ResetTransport{resets: resets, base: server.Client().Transport}
+			transport := &syncV2ResetTransport{failure: failure, resets: resets, base: server.Client().Transport}
 			c.syncV2.client = syncv2.NewClient(server.URL, "fixture", &http.Client{Transport: transport})
 			handled, err := c.SynchronizeConversationV2(ctx, false)
 			if !handled || err == nil || listener.failures != 1 || listener.finishes != 0 || c.syncV2.mode.Load() == syncV2Legacy {
@@ -150,7 +161,7 @@ func TestSyncV2RuntimeBoundsConnectionResetRetries(t *testing.T) {
 				if !errors.As(err, &status) || status.StatusCode != http.StatusForbidden {
 					t.Fatal(err)
 				}
-			} else if transport.calls != 2 || listener.starts != 0 || !errors.Is(err, syscall.ECONNRESET) {
+			} else if transport.calls != 2 || listener.starts != 0 || !errors.Is(err, failure) {
 				t.Fatalf("retry not bounded: calls=%d starts=%d err=%v", transport.calls, listener.starts, err)
 			}
 		})

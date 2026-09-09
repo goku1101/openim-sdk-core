@@ -2,6 +2,7 @@ package syncv2
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -51,5 +52,17 @@ func TestRecoveryRetriesWrappedConnectionReset(t *testing.T) {
 	}
 	if got := RecoveryFor(errors.New("connection reset by peer")); got != Stop {
 		t.Fatalf("untyped error must not be retried: %v", got)
+	}
+}
+
+func TestRecoveryRetriesHTTPTransportUnexpectedEOF(t *testing.T) {
+	transportError := &url.Error{Op: "Post", URL: "https://fixture.invalid/conversation/sync_capabilities", Err: io.ErrUnexpectedEOF}
+	if got := RecoveryFor(transportError); got != Retry {
+		t.Fatalf("HTTP transport EOF: got %v want Retry", got)
+	}
+	for _, err := range []error{io.ErrUnexpectedEOF, io.EOF, errors.New("unexpected EOF")} {
+		if got := RecoveryFor(err); got != Stop {
+			t.Fatalf("non-transport failure must not become retry: %v -> %v", err, got)
+		}
 	}
 }
