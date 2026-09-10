@@ -847,55 +847,25 @@ func (c *Conversation) singleHandle(_ context.Context, self, others []*model_str
 
 }
 
-// groupHandle processes chat logs for group chat conversations.
-// It merges the `self` and `others` chat logs and updates the SenderFaceURL and SenderNickname fields
-// using the group members' information. If group member information is not available,
-// it attempts to retrieve the sender's information from a local cache.
+// groupHandle only reuses locally available member profiles. Message delivery must
+// not generate network requests merely to refresh sender names or avatars.
 func (c *Conversation) groupHandle(ctx context.Context, self, others []*model_struct.LocalChatLog, lc *model_struct.LocalConversation) {
 	allMessage := append(self, others...)
-
-	allSenders := datautil.Slice(allMessage, func(e *model_struct.LocalChatLog) string {
-		return e.SendID
-	})
-	userIDs := datautil.Distinct(allSenders)
-	specialUsersInfo, missKeys := c.user.UserCache().BatchGetSpecialUser(ctx, userIDs)
-
-	groupMap, err := c.group.GetGroupMembersInfo(ctx, lc.GroupID, missKeys)
+	allSenders := datautil.Slice(allMessage, func(e *model_struct.LocalChatLog) string { return e.SendID })
+	members, err := c.group.GetLocalGroupMemberProfiles(ctx, lc.GroupID, datautil.Distinct(allSenders))
 	if err != nil {
-		log.ZError(ctx, "get group member info err", err)
 		return
-	}
-	specialUsers := make(map[string]*model_struct.LocalUser)
-	for _, chatLog := range allMessage {
-		if g, ok := groupMap[chatLog.SendID]; ok { // If group member info is successfully retrieved
-			log.ZDebug(ctx, "find in GetGroupMemberNameAndFaceURL", "sendID", chatLog.SendID, "faceURL", g.FaceURL, "nickName", g.Nickname)
-			if g.FaceURL != "" && g.Nickname != "" {
-				chatLog.SenderFaceURL = g.FaceURL
-				chatLog.SenderNickname = g.Nickname
+	} // Keep the message snapshot when local storage is unavailable.
+	for _, message := range allMessage {
+		if member := members[message.SendID]; member != nil {
+			if member.FaceURL != "" {
+				message.SenderFaceURL = member.FaceURL
 			}
-		} else if u, ok := specialUsersInfo[chatLog.SendID]; ok {
-			if u.FaceURL != "" && u.Nickname != "" {
-				chatLog.SenderFaceURL = u.FaceURL
-				chatLog.SenderNickname = u.Nickname
+			if member.Nickname != "" {
+				message.SenderNickname = member.Nickname
 			}
-		} else { // Otherwise, retrieve from local temporary cache
-			// Maybe it's a user information that doesn't exist on the server, but has sent a message before or admin user.
-			userInfo, err := c.user.GetUserInfoWithCache(ctx, chatLog.SendID)
-			if err != nil {
-				userInfo = &model_struct.LocalUser{UserID: chatLog.SendID}
-			}
-			if userInfo.FaceURL != "" && userInfo.Nickname != "" {
-				log.ZDebug(ctx, "find in getUserNameAndFaceURL", "sendID", chatLog.SendID)
-				chatLog.SenderFaceURL = userInfo.FaceURL
-				chatLog.SenderNickname = userInfo.Nickname
-			}
-			specialUsers[chatLog.SendID] = userInfo
 		}
 	}
-	if len(specialUsers) > 0 {
-		c.user.UserCache().BatchAddSpecialUser(specialUsers)
-	}
-
 }
 
 func shouldRepairDuplicateMessages(messages []*model_struct.LocalChatLog) bool {

@@ -27,6 +27,17 @@ func (c *Conversation) consumeConversationSyncV2LiveSelected(ctx context.Context
 		return c.ConsumeConversationSyncV2(ctx, progress, messages)
 	}
 	return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
+		visibilityStore, ok := c.db.(interface {
+			GetConversationSyncV2Visibility(context.Context, string) (*model_struct.LocalConversationSyncV2Visibility, error)
+			RevealConversationSyncV2(context.Context, string, uint64) error
+		})
+		if !ok {
+			return fmt.Errorf("sync v2: visibility persistence unavailable")
+		}
+		visibility, err := visibilityStore.GetConversationSyncV2Visibility(ctx, progress.ConversationID)
+		if err != nil {
+			return err
+		}
 		ids := make([]string, 0, len(messages))
 		for _, message := range messages {
 			if message == nil {
@@ -62,6 +73,9 @@ func (c *Conversation) consumeConversationSyncV2LiveSelected(ctx context.Context
 		}
 		if len(incoming) == 0 {
 			return nil
+		}
+		if err = visibilityStore.RevealConversationSyncV2(ctx, progress.ConversationID, visibility.Revision); err != nil {
+			return err
 		}
 		conversation, err := c.db.GetConversation(ctx, progress.ConversationID)
 		if err != nil {

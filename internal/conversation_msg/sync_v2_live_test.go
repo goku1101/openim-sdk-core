@@ -83,6 +83,28 @@ func TestSyncV2LiveCallbackFollowsCommitAndDoesNotRepeat(t *testing.T) {
 		t.Fatalf("live callback incremented authoritative unread: %+v %v", conversation, err)
 	}
 
+	if err = database.HideConversationSyncV2(ctx, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.consumeConversationSyncV2Live(ctx, stream, []*sdkws.MsgData{message}); !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+		t.Fatalf("hidden stream accepted stale queued messages: %v", err)
+	}
+	current, err := database.GetConversationSyncV2Stream(ctx, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err = database.AcceptConversationSyncV2State(ctx, current.Epoch, &model_struct.LocalConversationSyncV2Stream{ConversationID: "c", ParentID: "c", StateToken: "fresh", MinSeq: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.ScannedSeq = 1
+	if err = c.consumeConversationSyncV2Live(ctx, stream, []*sdkws.MsgData{message}); err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := database.GetConversationSyncV2Visibility(ctx, "c")
+	if err != nil || !hidden.Hidden {
+		t.Fatalf("existing message replay revealed conversation: %+v %v", hidden, err)
+	}
 	batchCount := 0
 	batchListener := &syncV2LiveBatchListener{onMessages: func(value string) {
 		var rows []*sdk_struct.MsgStruct
@@ -108,6 +130,10 @@ func TestSyncV2LiveCallbackFollowsCommitAndDoesNotRepeat(t *testing.T) {
 	}
 	if batchCount != 1 || count != 1 {
 		t.Fatalf("wrong callback channel/count: batch=%d single=%d", batchCount, count)
+	}
+	revealed, err := database.GetConversationSyncV2Visibility(ctx, "c")
+	if err != nil || revealed.Hidden {
+		t.Fatalf("new live message did not reveal conversation: %+v %v", revealed, err)
 	}
 	if err = database.InvalidateConversationSyncV2Stream(ctx, "c"); err != nil {
 		t.Fatal(err)

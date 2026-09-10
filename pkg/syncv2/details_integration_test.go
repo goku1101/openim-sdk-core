@@ -51,7 +51,7 @@ func TestPrepareDetailsCommitsServerStateBeforeMessageStage(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	round, err := syncv2.NewClient(server.URL, "", server.Client()).PrepareDetails(ctx, "op", "u", []string{"si_u_v"}, database)
+	round, err := syncv2.NewClient(server.URL, "", server.Client()).PrepareDetails(ctx, "op", "u", database)
 	if err != nil {
 		t.Fatal(err)
 	}

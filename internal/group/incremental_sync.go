@@ -308,7 +308,7 @@ func (g *Group) onlineSyncGroupAndMember(ctx context.Context, groupID string, de
 			return false
 		},
 	}
-	return groupMemberSyncer.CheckVersionSync()
+	return g.finishNotificationMemberSync(ctx, groupID, groupMemberSyncer.CheckVersionSync())
 }
 
 func (g *Group) IncrSyncJoinGroup(ctx context.Context) error {

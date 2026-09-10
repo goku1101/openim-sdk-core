@@ -116,7 +116,7 @@ func TestPinnedServerHTTPDetailsFixture(t *testing.T) {
 		return resp, nil
 	})
 	started := time.Now()
-	round, err := syncv2.NewClient(endpoint, "fixture-only", &http.Client{Transport: transport}).PrepareDetails(ctx, "cross-process-fixture", user, nil, database)
+	round, err := syncv2.NewClient(endpoint, "fixture-only", &http.Client{Transport: transport}).PrepareDetails(ctx, "cross-process-fixture", user, database)
 	if err != nil {
 		var apiError *syncv2.APIError
 		if errors.As(err, &apiError) {

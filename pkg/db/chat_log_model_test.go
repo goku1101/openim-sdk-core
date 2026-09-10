@@ -14,17 +14,53 @@ import (
 
 func TestGetLatestValidateServerMessage(t *testing.T) {
 	ctx := context.Background()
-	db, err := NewDataBase(ctx, "1695766238", "../../", 6)
-	if err != nil {
-		return
-	}
-
-	message, err := db.GetLatestValidServerMessage(ctx, "sg_93606743", 1710774468519, true)
-
+	database, err := NewDataBase(ctx, "9007199254740993", t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log("message", message)
+	defer database.Close(ctx)
+	const conversationID = "sg_test_history"
+	if err := database.initChatLog(ctx, conversationID); err != nil {
+		t.Fatal(err)
+	}
+	messages := []*model_struct.LocalChatLog{
+		{ClientMsgID: "server-before", Seq: 1, SendTime: 100},
+		{ClientMsgID: "local-only", Seq: 0, SendTime: 200},
+		{ClientMsgID: "server-after", Seq: 3, SendTime: 300},
+		{ClientMsgID: "server-last", Seq: 4, SendTime: 400},
+	}
+	if err := database.conn.Table(utils.GetTableName(conversationID)).Create(messages).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		start   int64
+		reverse bool
+		want    string
+	}{
+		{"reverse skips local messages", 250, true, "server-before"},
+		{"forward nearest server message", 250, false, "server-after"},
+		{"reverse excludes boundary", 300, true, "server-before"},
+		{"forward excludes boundary", 300, false, "server-last"},
+		{"before first server message", 100, true, ""},
+		{"after last server message", 400, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message, err := database.GetLatestValidServerMessage(ctx, conversationID, tc.start, tc.reverse)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if message != nil {
+					t.Fatalf("expected no message, got %s", message.ClientMsgID)
+				}
+				return
+			}
+			if message == nil || message.ClientMsgID != tc.want {
+				t.Fatalf("message = %+v, want %s", message, tc.want)
+			}
+		})
+	}
 }
 
 func TestCleanDuplicateInvalidMessages(t *testing.T) {

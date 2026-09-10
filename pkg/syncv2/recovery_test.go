@@ -21,6 +21,7 @@ func TestRecoveryRequiresMatchingCodeAndReason(t *testing.T) {
 		{8, "SYNC_V2_READ_CONCURRENCY", Retry},
 		{8, "SYNC_V2_SNAPSHOT_QUOTA", Retry},
 		{9, "SYNC_V2_SNAPSHOT_EXPIRED", RebuildSnapshot},
+		{500, "ServerInternalError", Stop},
 		{9, "SYNC_V2_POLICY_CHANGED", RebuildSnapshot},
 		{9, "SYNC_V2_INVALID_STORED_ID", Stop},
 		{10, "SYNC_V2_STATE_CHANGED", RefreshState},

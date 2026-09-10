@@ -83,7 +83,7 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 			if err := g.IncrSyncJoinGroup(ctx); err != nil {
 				return err
 			}
-			return g.IncrSyncGroupAndMember(ctx, detail.Group.GroupID)
+			return g.finishNotificationMemberSync(ctx, detail.Group.GroupID, g.IncrSyncGroupAndMember(ctx, detail.Group.GroupID))
 
 		case constant.GroupInfoSetNotification: // 1502
 			var detail sdkws.GroupInfoSetTips
@@ -152,7 +152,7 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 				if err := g.IncrSyncJoinGroup(ctx); err != nil {
 					return err
 				}
-				return g.IncrSyncGroupAndMember(ctx, detail.Group.GroupID)
+				return g.finishNotificationMemberSync(ctx, detail.Group.GroupID, g.IncrSyncGroupAndMember(ctx, detail.Group.GroupID))
 			} else {
 				return g.onlineSyncGroupAndMember(ctx, detail.Group.GroupID, nil, nil,
 					detail.InvitedUserList, detail.Group, groupSortIDUnchanged, detail.GroupMemberVersion, detail.GroupMemberVersionID)
@@ -166,7 +166,7 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 				if err := g.IncrSyncJoinGroup(ctx); err != nil {
 					return err
 				}
-				return g.IncrSyncGroupAndMember(ctx, detail.Group.GroupID)
+				return g.finishNotificationMemberSync(ctx, detail.Group.GroupID, g.IncrSyncGroupAndMember(ctx, detail.Group.GroupID))
 			} else {
 				return g.onlineSyncGroupAndMember(ctx, detail.Group.GroupID, nil, nil,
 					[]*sdkws.GroupMemberFullInfo{detail.EntrantUser}, detail.Group, groupSortIDUnchanged, detail.GroupMemberVersion, detail.GroupMemberVersionID)
@@ -252,6 +252,28 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 				nil, detail.Group, groupSortIDUnchanged, detail.GroupMemberVersion, detail.GroupMemberVersionID)
 		default:
 			return errs.New("unknown tips type", "contentType", msg.ContentType).Wrap()
+		}
+	}
+	return nil
+}
+
+// A replayed group event can predate our departure. Refresh membership before
+// treating the member API's permission denial as an obsolete notification.
+// Callers hold groupSyncMutex, as they do for the original member synchronization.
+func (g *Group) finishNotificationMemberSync(ctx context.Context, groupID string, syncErr error) error {
+	if !errs.ErrNoPermission.Is(syncErr) {
+		return syncErr
+	}
+	if err := g.IncrSyncJoinGroup(ctx); err != nil {
+		return err
+	}
+	groups, err := g.db.GetJoinedGroupListDB(ctx)
+	if err != nil {
+		return err
+	}
+	for _, joined := range groups {
+		if joined.GroupID == groupID {
+			return syncErr
 		}
 	}
 	return nil

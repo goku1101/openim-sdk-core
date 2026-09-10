@@ -16,13 +16,13 @@ type CoordinatorStore interface {
 	DetailsStore
 	MetadataStore
 	BatchStreamStore
-	GetAllConversationIDList(context.Context) ([]string, error)
 }
 
 // Hooks bind the protocol to existing SDK facilities. Publish must durably
 // refresh conversation projections before the checkpoint can become ready.
 // The caller owns start/failure/finish notifications; finish follows success.
 type CoordinatorHooks struct {
+	PrepareInitial func(context.Context, *Round) error
 	Negotiated     func(context.Context, *pb.Capabilities) error
 	PrepareRelated func(context.Context) error
 	ReadMetadata   func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error)
@@ -72,11 +72,7 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 			}
 		})
 	}
-	loaded, err := store.GetAllConversationIDList(ctx)
-	if err != nil {
-		return nil, err
-	}
-	round, err := c.prepareRoundWithCapabilities(ctx, op, userID, loaded, store, caps, report)
+	round, err := c.prepareRoundWithCapabilities(ctx, op, userID, store, caps, report)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +85,20 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 		return result, nil
 	}
 	report(10)
+	if hooks.PrepareInitial != nil {
+		if err = hooks.PrepareInitial(ctx, round); err != nil {
+			return nil, err
+		}
+		// Preview notification consumers may have advanced metadata.
+		checkpoint, readErr := store.GetConversationSyncV2(ctx)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if checkpoint.Generation != round.Checkpoint.Generation {
+			return nil, fmt.Errorf("sync v2: initial page superseded")
+		}
+		round.Checkpoint = checkpoint
+	}
 	if err = hooks.PrepareRelated(ctx); err != nil {
 		return nil, err
 	}

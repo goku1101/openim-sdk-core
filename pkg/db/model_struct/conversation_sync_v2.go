@@ -52,3 +52,15 @@ type LocalConversationSyncV2Retry struct {
 }
 
 func (LocalConversationSyncV2Retry) TableName() string { return "local_conversation_sync_v2_retries" }
+
+// Visibility is local user intent, independent of server sequence permissions.
+// Revision orders explicit local actions without relying on wall-clock time.
+type LocalConversationSyncV2Visibility struct {
+	ConversationID string `gorm:"column:conversation_id;primaryKey"`
+	Hidden         bool   `gorm:"column:hidden"`
+	Revision       uint64 `gorm:"column:revision"`
+}
+
+func (LocalConversationSyncV2Visibility) TableName() string {
+	return "local_conversation_sync_v2_visibility"
+}

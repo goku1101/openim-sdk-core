@@ -36,10 +36,29 @@ func (d *DataBase) ApplyConversationSyncV2Details(ctx context.Context, checkpoin
 // Metadata version, current details and explicit deletions commit atomically.
 // The old legacy UIDList and message tables are not repurposed or erased.
 func (d *DataBase) ApplyConversationSyncV2Metadata(ctx context.Context, before, next *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted []string) error {
+	if next == nil {
+		return fmt.Errorf("sync v2: invalid metadata checkpoint")
+	}
+	return d.ApplyConversationSyncV2MetadataSubset(ctx, before, next, response, deleted, next.SelectedIDs)
+}
+
+// A notification refresh preserves unrelated streams and their pending state.
+func (d *DataBase) ApplyConversationSyncV2MetadataSubset(ctx context.Context, before, next *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted, refreshed []string) error {
 	if before == nil || next == nil || response == nil || before.UserID != d.loginUserID || next.UserID != d.loginUserID || before.Generation != next.Generation || before.SnapshotID != next.SnapshotID || before.VersionID != next.VersionID || next.Version < before.Version || next.Stage != "messages" || before.Stage != "messages" && before.Stage != "catchup" && before.Stage != "ready" {
 		return fmt.Errorf("sync v2: invalid metadata checkpoint")
 	}
-	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted, next.SelectedIDs, false)
+	selected := make(map[string]bool, len(next.SelectedIDs))
+	for _, id := range next.SelectedIDs {
+		selected[id] = true
+	}
+	seen := make(map[string]bool, len(refreshed))
+	for _, id := range refreshed {
+		if !selected[id] || seen[id] {
+			return fmt.Errorf("sync v2: metadata refresh outside selection or duplicated")
+		}
+		seen[id] = true
+	}
+	return d.applyConversationSyncV2Details(ctx, before, next, response, deleted, refreshed, false)
 }
 
 func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected, checkpoint *model_struct.LocalConversationSyncV2, response *pb.StateResponse, deleted, refreshed []string, existingOnly bool) error {
@@ -92,6 +111,14 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 		if current.Revision != expected.Revision || current.Generation != expected.Generation || current.SnapshotID != expected.SnapshotID || current.Stage != expected.Stage || current.VersionID != expected.VersionID || current.Version != expected.Version {
 			return fmt.Errorf("%w: stale details round", sdkerrs.ErrSyncV2StateChanged)
 		}
+		var hiddenRows []model_struct.LocalConversationSyncV2Visibility
+		if err := tx.Where("hidden = ? AND conversation_id IN (?)", true, refreshed).Find(&hiddenRows).Error; err != nil {
+			return err
+		}
+		hidden := make(map[string]bool, len(hiddenRows))
+		for _, row := range hiddenRows {
+			hidden[row.ConversationID] = true
+		}
 		checkIDs := append(append([]string(nil), refreshed...), deleted...)
 		epochs, err := conversationSyncV2Epochs(tx, checkIDs)
 		if err != nil {
@@ -133,6 +160,17 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 			if detail.ConversationID != id || detail.OwnerUserID != d.loginUserID {
 				return fmt.Errorf("sync v2: detail identity mismatch")
 			}
+			if hidden[id] && state.Known && state.IsPinned {
+				var previous model_struct.LocalConversation
+				if err := tx.Where("conversation_id = ?", id).Take(&previous).Error; err != nil {
+					return err
+				}
+				if !previous.IsPinned {
+					if err := tx.Model(&model_struct.LocalConversationSyncV2Visibility{}).Where("conversation_id = ? AND hidden = ?", id, true).Updates(map[string]interface{}{"hidden": false, "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+						return err
+					}
+				}
+			}
 			columns := map[string]interface{}{
 				"conversation_id": id, "conversation_type": detail.ConversationType, "user_id": detail.UserID, "group_id": detail.GroupID,
 				"recv_msg_opt": detail.RecvMsgOpt, "group_at_type": detail.GroupAtType, "is_pinned": state.IsPinned,
@@ -169,13 +207,30 @@ func (d *DataBase) SaveConversationSyncV2(ctx context.Context, checkpoint *model
 	}
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
-	// UpdateAll persists false/zero/empty values when restarting a failed round.
-	result := d.conn.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true, Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "? = 'snapshot' OR (generation = ? AND revision = ?)", Vars: []interface{}{checkpoint.Stage, checkpoint.Generation, checkpoint.Revision}}}}}).Create(checkpoint)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("%w: stale checkpoint generation", sdkerrs.ErrSyncV2StateChanged)
-	}
-	return nil
+	return d.conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if checkpoint.Stage == "snapshot" {
+			var previous model_struct.LocalConversationSyncV2
+			result := tx.Select("stage").Where("user_id = ?", d.loginUserID).Limit(1).Find(&previous)
+			if result.Error != nil {
+				return result.Error
+			}
+			if previous.Stage == "legacy" {
+				// Legacy writes can restore an entry without updating the V2 visibility
+				// marker. Preserve their result when taking ownership back from legacy.
+				visible := tx.Model(&model_struct.LocalConversation{}).Select("conversation_id").Where("latest_msg_send_time > ?", 0)
+				if err := tx.Model(&model_struct.LocalConversationSyncV2Visibility{}).Where("hidden = ? AND conversation_id IN (?)", true, visible).Updates(map[string]interface{}{"hidden": false, "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		// UpdateAll persists false/zero/empty values when restarting a failed round.
+		result := tx.Clauses(clause.OnConflict{UpdateAll: true, Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "? = 'snapshot' OR (generation = ? AND revision = ?)", Vars: []interface{}{checkpoint.Stage, checkpoint.Generation, checkpoint.Revision}}}}}).Create(checkpoint)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("%w: stale checkpoint generation", sdkerrs.ErrSyncV2StateChanged)
+		}
+		return nil
+	})
 }

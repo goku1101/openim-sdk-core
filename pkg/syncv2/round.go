@@ -23,8 +23,8 @@ type DetailsStore interface {
 
 // PrepareDetails advances only after the database commits the details and
 // checkpoint together. Message delivery and final completion remain separate.
-func (c *Client) PrepareDetails(ctx context.Context, op, userID string, loadedIDs []string, store DetailsStore) (*Round, error) {
-	round, err := c.PrepareRound(ctx, op, userID, loadedIDs, store)
+func (c *Client) PrepareDetails(ctx context.Context, op, userID string, store DetailsStore) (*Round, error) {
+	round, err := c.PrepareRound(ctx, op, userID, store)
 	if err != nil {
 		return nil, err
 	}
@@ -60,15 +60,15 @@ type Round struct {
 	Checkpoint         *model_struct.LocalConversationSyncV2
 }
 
-func (c *Client) PrepareRound(ctx context.Context, op, userID string, loadedIDs []string, store RoundStore) (*Round, error) {
+func (c *Client) PrepareRound(ctx context.Context, op, userID string, store RoundStore) (*Round, error) {
 	caps, err := c.Capabilities(ctx, op, &pb.UserRequest{UserID: userID})
 	if err != nil {
 		return nil, err
 	}
-	return c.prepareRoundWithCapabilities(ctx, op, userID, loadedIDs, store, caps, nil)
+	return c.prepareRoundWithCapabilities(ctx, op, userID, store, caps, nil)
 }
 
-func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID string, loadedIDs []string, store RoundStore, caps *pb.Capabilities, progress func(int)) (*Round, error) {
+func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID string, store RoundStore, caps *pb.Capabilities, progress func(int)) (*Round, error) {
 	if !caps.ConversationSyncV2 {
 		return &Round{Enabled: false, Capabilities: caps}, nil
 	}
@@ -79,7 +79,7 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	if _, err := rand.Read(generation[:]); err != nil {
 		return nil, err
 	}
-	checkpoint := &model_struct.LocalConversationSyncV2{UserID: userID, Generation: hex.EncodeToString(generation[:]), PolicyVersion: PolicyVersion, Stage: "snapshot", SelectedIDs: append(model_struct.StringArray(nil), loadedIDs...)}
+	checkpoint := &model_struct.LocalConversationSyncV2{UserID: userID, Generation: hex.EncodeToString(generation[:]), PolicyVersion: PolicyVersion, Stage: "snapshot"}
 	if err := store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
 		return nil, err
 	}
@@ -87,18 +87,8 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	if err != nil {
 		return nil, err
 	}
-	// Existing devices keep already-loaded chats and local drafts/history. This
-	// union controls requests only; absence never becomes a local delete action.
-	seen := make(map[string]bool, len(selection.ChatIDs)+len(loadedIDs))
-	for _, id := range selection.ChatIDs {
-		seen[id] = true
-	}
-	for _, id := range loadedIDs {
-		if !seen[id] {
-			selection.ChatIDs = append(selection.ChatIDs, id)
-			seen[id] = true
-		}
-	}
+	// Local history remains in its own tables. A new round requests only the
+	// server selection; explicit activation can extend this round independently.
 	checkpoint.SelectedIDs = selection.ChatIDs
 	checkpoint.SnapshotID = selection.SnapshotID
 	checkpoint.NotificationIDs = selection.NotificationIDs

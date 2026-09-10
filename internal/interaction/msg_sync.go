@@ -51,6 +51,7 @@ type MsgSyncer struct {
 	recvCh                 chan common.Cmd2Value // channel for receiving push messages and the maximum SEQ number
 	conversationCh         chan common.Cmd2Value // storage and session triggering
 	syncedMaxSeqs          map[string]int64      // map of the maximum synced SEQ numbers for all group IDs
+	legacySeqPending       bool
 	syncedMaxSeqsLock      sync.RWMutex          // syncedMaxSeqs map lock
 	db                     db_interface.DataBase // data store
 	syncTimes              int                   // times of sync
@@ -76,7 +77,7 @@ func (m *MsgSyncer) SetConversationSyncV2Push(run func(context.Context, *sdkws.P
 
 func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 	if m.conversationSyncV2 == nil {
-		return false
+		return !m.ensureLegacySeq(ctx)
 	}
 	handled, err := m.conversationSyncV2(ctx, m.reinstalled)
 	if err != nil {
@@ -86,12 +87,15 @@ func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 	if handled {
 		m.reinstalled = false
 	}
-	return handled
+	if !handled {
+		return !m.ensureLegacySeq(ctx)
+	}
+	return true
 }
 
 // NewMsgSyncer creates a new instance of the message synchronizer.
 func NewMsgSyncer(ctx context.Context, conversationCh, recvCh chan common.Cmd2Value,
-	loginUserID string, longConnMgr *LongConnMgr, db db_interface.DataBase, syncTimes int) (*MsgSyncer, error) {
+	loginUserID string, longConnMgr *LongConnMgr, db db_interface.DataBase, syncTimes int, deferLegacySeq bool) (*MsgSyncer, error) {
 	m := &MsgSyncer{
 		loginUserID:    loginUserID,
 		longConnMgr:    longConnMgr,
@@ -102,11 +106,49 @@ func NewMsgSyncer(ctx context.Context, conversationCh, recvCh chan common.Cmd2Va
 		db:             db,
 		syncTimes:      syncTimes,
 	}
-	if err := m.loadSeq(ctx); err != nil {
+	if deferLegacySeq {
+		ids, err := m.db.GetAllConversationIDList(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := m.loadInstallState(ctx, len(ids)); err != nil {
+			return nil, err
+		}
+		m.legacySeqPending = true
+	} else if err := m.loadSeq(ctx); err != nil {
 		log.ZError(ctx, "loadSeq err", err)
 		return nil, err
 	}
 	return m, nil
+}
+
+// V2 uses its durable stream cursors, but still needs the original install window.
+func (m *MsgSyncer) loadInstallState(ctx context.Context, conversationCount int) error {
+	if conversationCount == 0 {
+		version, err := m.db.GetAppSDKVersion(ctx)
+		if err != nil && !errors.Is(err, errs.ErrRecordNotFound) {
+			return err
+		}
+		if version == nil || !version.Installed {
+			m.reinstalled = true
+		}
+	}
+
+	return nil
+}
+
+// All callers run on the message listener, after explicit legacy selection.
+func (m *MsgSyncer) ensureLegacySeq(ctx context.Context) bool {
+	if !m.legacySeqPending {
+		return true
+	}
+	if err := m.loadSeq(ctx); err != nil {
+		log.ZWarn(ctx, "load legacy sequence state failed", err)
+		common.TriggerCmdSyncFlag(ctx, constant.MsgSyncFailed, m.conversationCh)
+		return false
+	}
+	m.legacySeqPending = false
+	return true
 }
 
 // seq The db reads the data to the memory,set syncedMaxSeqs
@@ -117,14 +159,8 @@ func (m *MsgSyncer) loadSeq(ctx context.Context) error {
 		return err
 	}
 
-	if len(conversationIDList) == 0 {
-		version, err := m.db.GetAppSDKVersion(ctx)
-		if err != nil && !errors.Is(err, errs.ErrRecordNotFound) {
-			return err
-		}
-		if version == nil || !version.Installed {
-			m.reinstalled = true
-		}
+	if err := m.loadInstallState(ctx, len(conversationIDList)); err != nil {
+		return err
 	}
 
 	// TODO With a large number of sessions(10w), this could potentially cause blocking and needs optimization.
@@ -349,6 +385,9 @@ func (m *MsgSyncer) doPushMsg(ctx context.Context, push *sdkws.PushMessages) {
 		if handled {
 			return
 		}
+	}
+	if !m.ensureLegacySeq(ctx) {
+		return
 	}
 	log.ZDebug(ctx, "push msgs", "push", push, "syncedMaxSeqs", m.syncedMaxSeqs)
 	m.pushTriggerAndSync(ctx, push.Msgs, m.triggerConversation)

@@ -140,6 +140,9 @@ func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *mode
 			if err != nil {
 				return err
 			}
+			if conversation.LatestMsgSendTime == 0 {
+				return nil
+			}
 			c.ConversationListener().OnConversationChanged(utils.StructToJsonString([]*model_struct.LocalConversation{conversation}))
 			unread, err := c.db.GetTotalUnreadMsgCountDB(ctx)
 			if err != nil {

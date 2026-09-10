@@ -22,8 +22,15 @@ func (c *Conversation) activateConversationSyncV2(ctx context.Context, id string
 	if ccontext.Info(ctx).OperationID() == "" {
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
+	visibility, err := runtime.store.GetConversationSyncV2Visibility(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	checkpoint, err := runtime.client.ActivateConversation(ctx, ccontext.Info(ctx).OperationID(), id, caps, runtime.store)
 	if err != nil {
+		return nil, err
+	}
+	if err = runtime.store.RevealConversationSyncV2(ctx, id, visibility.Revision); err != nil {
 		return nil, err
 	}
 	// Only update this chat's display projection. The full persisted selection

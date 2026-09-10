@@ -103,7 +103,7 @@ func verifyLargeAccountRequestScope(t *testing.T, selected int) {
 		}
 	}))
 	defer server.Close()
-	round, err := NewClient(server.URL, "", server.Client()).PrepareRound(context.Background(), "op", "u", nil, new(checkpointMemory))
+	round, err := NewClient(server.URL, "", server.Client()).PrepareRound(context.Background(), "op", "u", new(checkpointMemory))
 	if err != nil {
 		t.Fatal(err)
 	}

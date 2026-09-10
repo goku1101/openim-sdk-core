@@ -33,7 +33,7 @@ func TestSyncV2ProjectionProgressFollowsDurableBatches(t *testing.T) {
 			for i := 0; i < 301; i++ {
 				id := fmt.Sprintf("qa_%d", i)
 				cp.SelectedIDs = append(cp.SelectedIDs, id)
-				if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: id, ConversationType: constant.SingleChatType, UserID: "peer", LatestMsg: "old-preview", DraftText: "keep-draft"}); err != nil {
+				if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: id, ConversationType: constant.SingleChatType, UserID: "peer", LatestMsg: "old-preview", LatestMsgSendTime: 77, DraftText: "keep-draft", DraftTextTime: 88, MinSeq: 7, MaxSeq: 6}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -78,6 +78,17 @@ func TestSyncV2ProjectionProgressFollowsDurableBatches(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatal(err)
+			}
+			if !invalidateLast {
+				visible, listErr := database.GetConversationListSplitDB(ctx, 0, 500)
+				if listErr != nil || len(visible) != 301 {
+					t.Fatalf("cleared conversations with local drafts disappeared: visible=%d err=%v", len(visible), listErr)
+				}
+				for _, row := range visible {
+					if row.LatestMsg != "" || row.LatestMsgSendTime != 77 || row.DraftText != "keep-draft" || row.DraftTextTime != 88 {
+						t.Fatalf("local draft entry changed during initial projection: %+v", row)
+					}
+				}
 			}
 			if !reflect.DeepEqual(batches, expected) {
 				t.Fatalf("reported uncommitted/missing batches: %v, want %v", batches, expected)

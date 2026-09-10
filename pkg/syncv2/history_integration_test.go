@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
@@ -84,5 +85,56 @@ func TestHistoryPageKeepsScanCursorAndUnresolvedSequences(t *testing.T) {
 	conversation, err := database.GetConversation(ctx, "c")
 	if err != nil || conversation.MinSeq != 5 || conversation.MaxSeq != 100 || conversation.UnreadCount != 2 || conversation.DraftText != "draft" {
 		t.Fatalf("history bounds not committed safely: %+v %v", conversation, err)
+	}
+}
+
+func TestHistoryPageRetriesAfterConcurrentStreamInvalidation(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(ctx)
+	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	state := &pb.State{ConversationID: "c", Known: true, MinSeq: 1, MaxSeq: 2, StateToken: "fresh"}
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/msg/sync_seqs_v2" {
+			t.Errorf("unexpected route: %s", r.URL.Path)
+		}
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{state}}})
+	}))
+	defer server.Close()
+	client := syncv2.NewClient(server.URL, "", server.Client())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.ReadSequencePage(ctx, "op", &pb.PullRequest{UserID: "u", ConversationID: "c"}, &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, database)
+		result <- err
+	}()
+	<-started
+	if err = database.InvalidateConversationSyncV2Stream(ctx, "c"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err = <-result; err != nil {
+		t.Fatalf("history page did not recover from concurrent invalidation: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected one retry after stale stream response, got %d calls", calls.Load())
+	}
+	stream, err := database.GetConversationSyncV2Stream(ctx, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.StateToken != "fresh" || stream.Epoch != 2 {
+		t.Fatalf("retry did not accept state on the invalidated epoch: %+v", stream)
 	}
 }

@@ -44,6 +44,11 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 				t.Fatal(err)
 			}
 			defer database.Close(ctx)
+			archive := &model_struct.LocalConversation{ConversationID: "si_u_archive", DraftText: "retained draft", DraftTextTime: 99, LatestMsg: "retained history", LatestMsgSendTime: 88}
+			if err := database.InsertConversation(ctx, archive); err != nil {
+				t.Fatal(err)
+			}
+
 			queue := make(chan common.Cmd2Value, 100)
 			consumer := conv.NewConversation(ctx, nil, database, queue, nil, nil, nil, nil, nil)
 			queueStopped := make(chan struct{})
@@ -87,6 +92,10 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 					}
 					response := &pb.StateResponse{}
 					for _, id := range req.ConversationIDs {
+						if id == "si_u_archive" {
+							t.Error("local archive unexpectedly included in network sync")
+						}
+
 						if req.Notifications {
 							if id == "sg_later" {
 								lateParentChecked = true
@@ -120,6 +129,7 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 			defer server.Close()
 			client := syncv2.NewClient(server.URL, "", server.Client())
 			var progress []int
+			initialPrepared := false
 			result, err := client.Synchronize(ctx, "op", "u", database, syncv2.CoordinatorHooks{
 				Progress: func(value int) {
 					if value >= 100 || len(progress) > 0 && value <= progress[len(progress)-1] {
@@ -127,7 +137,20 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 					}
 					progress = append(progress, value)
 				},
-				PrepareRelated: func(context.Context) error { return nil },
+				PrepareInitial: func(ctx context.Context, round *syncv2.Round) error {
+					checkpoint, err := database.GetConversationSyncV2(ctx)
+					if err != nil || checkpoint.Generation != round.Checkpoint.Generation || checkpoint.Stage == "ready" {
+						return fmt.Errorf("initial page has no durable active checkpoint: %v", err)
+					}
+					initialPrepared = true
+					return nil
+				},
+				PrepareRelated: func(context.Context) error {
+					if !initialPrepared {
+						return errors.New("related data blocked initial page")
+					}
+					return nil
+				},
 				ReadMetadata: func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error) {
 					metadataReads++
 					tail = int64(metadataReads)
@@ -185,6 +208,11 @@ func TestCoordinatorConsumesThroughRealConversationQueueBeforeReady(t *testing.T
 			}
 			if err != nil && progress[len(progress)-1] >= 99 {
 				t.Fatalf("failed round reported complete: %v", progress)
+			}
+
+			retained, retainedErr := database.GetConversation(ctx, "si_u_archive")
+			if retainedErr != nil || retained.DraftText != archive.DraftText || retained.LatestMsg != archive.LatestMsg || retained.LatestMsgSendTime != archive.LatestMsgSendTime {
+				t.Fatalf("archive altered: %+v %v", retained, retainedErr)
 			}
 			checkpoint, readErr := database.GetConversationSyncV2(ctx)
 			if readErr != nil {

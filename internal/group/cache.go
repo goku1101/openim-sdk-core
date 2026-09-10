@@ -122,3 +122,28 @@ func (g *Group) GetGroupMembersInfo(ctx context.Context, groupID string, userIDs
 	}
 	return res, nil
 }
+
+// GetLocalGroupMemberProfiles never fetches from the server. Normal member APIs
+// persist their results in the local database, which takes precedence here.
+func (g *Group) GetLocalGroupMemberProfiles(ctx context.Context, groupID string, userIDs []string) (map[string]*model_struct.LocalGroupMember, error) {
+	result := make(map[string]*model_struct.LocalGroupMember)
+	if len(userIDs) == 0 {
+		return result, nil
+	}
+	members, err := g.db.GetGroupSomeMemberInfo(ctx, groupID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, member := range members {
+		result[member.UserID] = member
+	}
+	for _, userID := range userIDs {
+		if _, found := result[userID]; found {
+			continue
+		}
+		if member, found := g.groupMemberCache.Load(g.buildGroupMemberKey(groupID, userID)); found {
+			result[userID] = member
+		}
+	}
+	return result, nil
+}

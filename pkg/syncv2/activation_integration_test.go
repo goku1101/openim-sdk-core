@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync/atomic"
 	"testing"
 )
 
@@ -136,5 +137,64 @@ func TestActivationDoesNotPromoteUnconfirmedOrUnavailableChat(t *testing.T) {
 				t.Fatalf("failed activation erased local data: %+v %v", row, err)
 			}
 		})
+	}
+}
+
+func TestActivationRetriesAfterConcurrentStreamInvalidation(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(ctx)
+	checkpoint := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", Stage: "snapshot"}
+	if err = database.SaveConversationSyncV2(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.Stage = "ready"
+	if err = database.SaveConversationSyncV2(ctx, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "target", UserID: "peer"}); err != nil {
+		t.Fatal(err)
+	}
+	state := &pb.State{ConversationID: "target", Known: true, StateToken: "fresh", MinSeq: 1, MaxSeq: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "target", UserID: "peer"}}
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/msg/sync_seqs_v2" {
+			t.Errorf("unexpected route %s", r.URL.Path)
+		}
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{state}}})
+	}))
+	defer server.Close()
+	client := syncv2.NewClient(server.URL, "", server.Client())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.ActivateConversation(ctx, "op", "target", &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, database)
+		result <- err
+	}()
+	<-started
+	if err = database.InvalidateConversationSyncV2Stream(ctx, "target"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err = <-result; err != nil {
+		t.Fatalf("activation did not recover from concurrent invalidation: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected one retry after stale stream response, got %d calls", calls.Load())
+	}
+	stream, err := database.GetConversationSyncV2Stream(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.StateToken != "" || stream.Epoch != 2 {
+		t.Fatalf("retry did not preserve the invalidated stream epoch: %+v", stream)
 	}
 }

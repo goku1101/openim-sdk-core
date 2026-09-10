@@ -5,6 +5,7 @@ package conversation_msg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/group"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/interaction"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/relation"
@@ -14,14 +15,20 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/protocol/conversation"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
+	var hold atomic.Bool
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/msg/sync_seqs_v2" {
 			t.Errorf("unexpected route: %s", r.URL.Path)
@@ -33,10 +40,20 @@ func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 		if len(req.ConversationIDs) != 1 || req.ConversationIDs[0] != "si_peer_u" || !req.IncludeDetails {
 			t.Errorf("unexpected activation: %+v", req)
 		}
+		if hold.Load() {
+			started <- struct{}{}
+			hold.Store(false)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		state := &pb.State{ConversationID: "si_peer_u", Known: true, StateToken: "t", MinSeq: 5, MaxSeq: 9, UnreadCount: 2, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "si_peer_u", UserID: "peer", ConversationType: constant.SingleChatType}}
 		_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{state}}})
 	}))
 	defer server.Close()
+	defer close(release)
 	config := &ccontext.GlobalConfig{UserID: "u"}
 	config.ApiAddr = server.URL
 	ctx, cancel := context.WithCancel(ccontext.WithInfo(context.Background(), config))
@@ -46,7 +63,7 @@ func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close(ctx)
-	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Stage: "snapshot", Generation: "g", SelectedIDs: []string{"unrelated"}, NotificationIDs: []string{"si_peer_u", "unrelated"}}
+	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Stage: "snapshot", Generation: "g", SelectedIDs: []string{"unrelated"}, NotificationIDs: []string{"unrelated"}}
 	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +72,16 @@ func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "unrelated", ShowName: "untouched", LatestMsg: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{
+		ConversationID:   "si_peer_u",
+		ConversationType: constant.SingleChatType,
+		UserID:           "peer",
+		ShowName:         "stale",
+		FaceURL:          "stale-face",
+		UnreadCount:      7,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err = database.InsertFriend(ctx, &model_struct.LocalFriend{OwnerUserID: "u", FriendUserID: "peer", Nickname: "Peer", Remark: "Remark", FaceURL: "face"}); err != nil {
@@ -77,4 +104,42 @@ func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 	if err != nil || other.ShowName != "untouched" || other.LatestMsg != "keep" {
 		t.Fatalf("activation rewrote unrelated display: %+v %v", other, err)
 	}
+	if err = database.BatchInsertMessageList(ctx, "si_peer_u", []*model_struct.LocalChatLog{{ClientMsgID: "saved", Seq: 8, SendTime: 80, Status: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.HideConversation(ctx, "si_peer_u"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := c.GetOneConversation(ctx, constant.SingleChatType, "peer")
+	if err != nil || reopened.LatestMsgSendTime != 80 {
+		t.Fatalf("explicit open did not reveal saved history: %+v %v", reopened, err)
+	}
+
+	// An explicit open that started before a later hide may finish its server
+	// request, but must not restore the row after that newer local action.
+	hold.Store(true)
+	done := make(chan error, 1)
+	go func() { _, err := c.GetOneConversation(ctx, constant.SingleChatType, "peer"); done <- err }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation did not reach held request")
+	}
+	if err = c.HideConversation(ctx, "si_peer_u"); err != nil {
+		t.Fatal(err)
+	}
+	release <- struct{}{}
+	select {
+	case err = <-done:
+		if !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+			t.Fatalf("stale open must fail: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("activation did not finish")
+	}
+	hidden, err := database.GetConversation(ctx, "si_peer_u")
+	if err != nil || hidden.LatestMsgSendTime != 0 || hidden.LatestMsg != "" {
+		t.Fatalf("late activation resurfaced hidden entry: %+v %v", hidden, err)
+	}
+
 }

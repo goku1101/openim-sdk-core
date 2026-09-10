@@ -32,7 +32,7 @@ func (s *checkpointMemory) SaveConversationSyncV2(_ context.Context, v *model_st
 	return nil
 }
 
-func TestPrepareRoundPreservesLoadedChatsAndDoesNotFinishEarly(t *testing.T) {
+func TestPrepareRoundRequestsSelectionAndDoesNotFinishEarly(t *testing.T) {
 	store := new(checkpointMemory)
 	var requested []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +68,12 @@ func TestPrepareRoundPreservesLoadedChatsAndDoesNotFinishEarly(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	round, err := NewClient(server.URL, "", server.Client()).PrepareRound(context.Background(), "op", "u", []string{"loaded", "selected"}, store)
+	round, err := NewClient(server.URL, "", server.Client()).PrepareRound(context.Background(), "op", "u", store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !round.Enabled || len(requested) != 2 || requested[0] != "selected" || requested[1] != "loaded" {
-		t.Fatalf("local chats discarded: %v", requested)
+	if !round.Enabled || len(requested) != 1 || requested[0] != "selected" {
+		t.Fatalf("unexpected chat selection: %v", requested)
 	}
 	if len(store.stages) != 2 || store.stages[0] != "snapshot" || store.stages[1] != "details" || store.saved.Version != 4 {
 		t.Fatalf("incorrect checkpoints: %+v", store)
@@ -87,7 +87,7 @@ func TestPrepareRoundDoesNotFallbackOrOverwriteOnProbeFailure(t *testing.T) {
 			store := new(checkpointMemory)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; fmt.Fprint(w, response) }))
 			defer server.Close()
-			round, err := NewClient(server.URL, "", server.Client()).PrepareRound(context.Background(), "op", "u", nil, store)
+			round, err := NewClient(server.URL, "", server.Client()).PrepareRound(context.Background(), "op", "u", store)
 			if response == `{"errCode":0,"data":{"conversationSyncV2":false}}` {
 				if err != nil || round.Enabled {
 					t.Fatal("explicit legacy negotiation rejected")

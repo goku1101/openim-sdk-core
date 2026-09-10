@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
+	"github.com/openimsdk/tools/errs"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -32,6 +33,10 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string { return fmt.Sprintf("sync v2: %d %s", e.ErrCode, e.ErrMsg) }
+
+// Unwrap exposes the SDK callback's coded error without leaking server details.
+// The outer APIError remains available for Sync V2 recovery decisions.
+func (e *APIError) Unwrap() error { return errs.NewCodeError(e.ErrCode, e.ErrMsg) }
 
 type HTTPError struct{ StatusCode int }
 

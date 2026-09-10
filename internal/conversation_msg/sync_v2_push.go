@@ -175,6 +175,9 @@ func (c *Conversation) processConversationSyncV2PushRound(ctx context.Context, p
 			if err != nil {
 				return err
 			}
+			if conversation.LatestMsgSendTime == 0 {
+				return nil
+			}
 			payload := utils.StructToJsonString([]*model_struct.LocalConversation{conversation})
 			if chat.Activate {
 				c.ConversationListener().OnNewConversation(payload)

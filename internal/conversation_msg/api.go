@@ -2,6 +2,7 @@ package conversation_msg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -42,6 +43,9 @@ func (c *Conversation) GetConversationListSplit(ctx context.Context, offset, cou
 }
 
 func (c *Conversation) HideConversation(ctx context.Context, conversationID string) error {
+	if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+		return c.syncV2.store.HideConversationSyncV2(ctx, conversationID)
+	}
 	err := c.db.ResetConversation(ctx, conversationID)
 	if err != nil {
 		return err
@@ -55,20 +59,10 @@ func (c *Conversation) GetAtAllTag(_ context.Context) string {
 
 func (c *Conversation) GetOneConversation(ctx context.Context, sessionType int32, sourceID string) (*model_struct.LocalConversation, error) {
 	conversationID := c.getConversationIDBySessionType(sourceID, int(sessionType))
-	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
-		checkpoint, err := c.syncV2.store.GetConversationSyncV2(ctx)
-		if err != nil {
-			return nil, err
-		}
-		// Server-registered chats, including deferred ones, must recover their
-		// authoritative details before returning the opened conversation.
-		for _, ids := range []model_struct.StringArray{checkpoint.SelectedIDs, checkpoint.NotificationIDs} {
-			for _, id := range ids {
-				if id == conversationID {
-					return c.activateConversationSyncV2(ctx, conversationID)
-				}
-			}
-		}
+	if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+		// Explicitly opened conversations must refresh the authoritative
+		// server state even when they are outside the initial snapshot.
+		return c.activateConversationSyncV2(ctx, conversationID)
 	}
 	lc, err := c.db.GetConversation(ctx, conversationID)
 	if err == nil {
@@ -145,12 +139,50 @@ func (c *Conversation) SetConversation(ctx context.Context, conversationID strin
 	if err != nil {
 		return err
 	}
+	var visibility *model_struct.LocalConversationSyncV2Visibility
+	if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled && req.IsPinned != nil && req.IsPinned.Value {
+		visibility, err = c.syncV2.store.GetConversationSyncV2Visibility(ctx, conversationID)
+		if err != nil {
+			return err
+		}
+	}
 	apiReq := &pbConversation.SetConversationsReq{Conversation: req}
 	err = c.setConversation(ctx, apiReq, lc)
 	if err != nil {
 		return err
 	}
-	return c.IncrSyncConversations(ctx)
+	if visibility != nil {
+		if err = c.syncV2.store.RevealConversationSyncV2(ctx, conversationID, visibility.Revision); err != nil {
+			return err
+		}
+	}
+	syncMetadata := func() error {
+		if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
+			if err := c.refreshConversationSyncV2MetadataForIDs(ctx, []string{conversationID}); err != nil {
+				return err
+			}
+			if visibility != nil && visibility.Hidden {
+				c.syncV2.metadataMu.Lock()
+				defer c.syncV2.metadataMu.Unlock()
+				checkpoint, err := c.syncV2.store.GetConversationSyncV2(ctx)
+				if err != nil {
+					return err
+				}
+				projection := *checkpoint
+				projection.SelectedIDs = []string{conversationID}
+				return c.notifyConversationSyncV2Metadata(ctx, map[string]*model_struct.LocalConversation{conversationID: nil}, &projection)
+			}
+			return nil
+		}
+		return c.IncrSyncConversations(ctx)
+	}
+	err = syncMetadata()
+	if errors.Is(err, sdkerrs.ErrSyncV2StateChanged) && ctx.Err() == nil {
+		// The server mutation already succeeded. Re-read metadata once after
+		// a competing local commit; never replay the mutation itself.
+		return syncMetadata()
+	}
+	return err
 }
 
 func (c *Conversation) GetTotalUnreadMsgCount(ctx context.Context) (totalUnreadCount int32, err error) {
@@ -296,6 +328,13 @@ func (c *Conversation) sendMessage(ctx context.Context, s *sdk_struct.MsgStruct,
 	if err != nil {
 		return nil, err
 	}
+	var sendVisibility *model_struct.LocalConversationSyncV2Visibility
+	if !isOnlineOnly && c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+		sendVisibility, err = c.syncV2.store.GetConversationSyncV2Visibility(ctx, lc.ConversationID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	callback, _ := ctx.Value("callback").(open_im_sdk_callback.SendMsgCallBack)
 	log.ZDebug(ctx, "before insert message is", "message", *s)
 	if !isOnlineOnly {
@@ -325,6 +364,14 @@ func (c *Conversation) sendMessage(ctx context.Context, s *sdk_struct.MsgStruct,
 				if err != nil {
 					return nil, err
 				}
+			}
+		}
+		if sendVisibility != nil {
+			// A newly accepted local send restores an entrance; its eventual status
+			// callback does not. A hide during preparation still wins this CAS.
+			err = c.syncV2.store.RevealConversationSyncV2(ctx, lc.ConversationID, sendVisibility.Revision)
+			if err != nil && !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+				return nil, err
 			}
 		}
 		lc.LatestMsg = utils.StructToJsonString(s)
@@ -553,6 +600,13 @@ func (c *Conversation) sendMessageNotOss(ctx context.Context, s *sdk_struct.MsgS
 	if err != nil {
 		return nil, err
 	}
+	var sendVisibility *model_struct.LocalConversationSyncV2Visibility
+	if !isOnlineOnly && c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+		sendVisibility, err = c.syncV2.store.GetConversationSyncV2Visibility(ctx, lc.ConversationID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	callback, _ := ctx.Value("callback").(open_im_sdk_callback.SendMsgCallBack)
 	if !isOnlineOnly {
 		oldMessage, err := c.db.GetMessage(ctx, lc.ConversationID, s.ClientMsgID)
@@ -582,6 +636,14 @@ func (c *Conversation) sendMessageNotOss(ctx context.Context, s *sdk_struct.MsgS
 					return nil, err
 				}
 			}
+		}
+	}
+	if sendVisibility != nil {
+		// A newly accepted local send restores an entrance; its eventual status
+		// callback does not. A hide during preparation still wins this CAS.
+		err = c.syncV2.store.RevealConversationSyncV2(ctx, lc.ConversationID, sendVisibility.Revision)
+		if err != nil && !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+			return nil, err
 		}
 	}
 	lc.LatestMsg = utils.StructToJsonString(s)

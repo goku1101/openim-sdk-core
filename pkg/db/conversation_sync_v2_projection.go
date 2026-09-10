@@ -58,10 +58,22 @@ func (d *DataBase) ApplyConversationSyncV2Projection(ctx context.Context, checkp
 		if err != nil {
 			return err
 		}
+		var visibility []model_struct.LocalConversationSyncV2Visibility
+		if err := tx.Where("conversation_id IN (?) AND hidden = ?", ids, true).Find(&visibility).Error; err != nil {
+			return err
+		}
+		hidden := make(map[string]bool, len(visibility))
+		for _, row := range visibility {
+			hidden[row.ConversationID] = true
+		}
 		for _, conversation := range conversations {
 			expected, ok := expectedEpochs[conversation.ConversationID]
 			if !ok || epochs[conversation.ConversationID] != expected {
 				return fmt.Errorf("%w: invalidated projection", sdkerrs.ErrSyncV2StateChanged)
+			}
+			if hidden[conversation.ConversationID] {
+				conversation.LatestMsg = ""
+				conversation.LatestMsgSendTime = 0
 			}
 			result := tx.Model(&model_struct.LocalConversation{}).Where("conversation_id = ?", conversation.ConversationID).Updates(map[string]interface{}{"show_name": conversation.ShowName, "face_url": conversation.FaceURL, "latest_msg": conversation.LatestMsg, "latest_msg_send_time": conversation.LatestMsgSendTime})
 			if result.Error != nil {

@@ -48,7 +48,7 @@ func (d *DataBase) GetAllConversationListDB(ctx context.Context) ([]*model_struc
 	d.mRWMutex.RLock()
 	defer d.mRWMutex.RUnlock()
 	var conversationList []*model_struct.LocalConversation
-	err := errs.WrapMsg(d.conn.WithContext(ctx).Where("latest_msg_send_time > ?", 0).Order("case when is_pinned=1 then 0 else 1 end,max(latest_msg_send_time,draft_text_time) DESC").Find(&conversationList).Error,
+	err := errs.WrapMsg(d.conn.WithContext(ctx).Where("latest_msg_send_time > ?", 0).Order("case when is_pinned=1 then 0 else 1 end,max(coalesce(latest_msg_send_time,0),coalesce(draft_text_time,0)) DESC,conversation_id ASC").Find(&conversationList).Error,
 		"GetAllConversationList failed")
 	if err != nil {
 		return nil, err
@@ -101,7 +101,7 @@ func (d *DataBase) GetConversationListSplitDB(ctx context.Context, offset, count
 	d.mRWMutex.RLock()
 	defer d.mRWMutex.RUnlock()
 	var conversationList []*model_struct.LocalConversation
-	return conversationList, errs.Wrap(d.conn.WithContext(ctx).Where("latest_msg_send_time > ?", 0).Order("case when is_pinned=1 then 0 else 1 end,max(latest_msg_send_time,draft_text_time) DESC").Offset(offset).Limit(count).Find(&conversationList).Error)
+	return conversationList, errs.Wrap(d.conn.WithContext(ctx).Where("latest_msg_send_time > ?", 0).Order("case when is_pinned=1 then 0 else 1 end,max(coalesce(latest_msg_send_time,0),coalesce(draft_text_time,0)) DESC,conversation_id ASC").Offset(offset).Limit(count).Find(&conversationList).Error)
 }
 
 func (d *DataBase) BatchInsertConversationList(ctx context.Context, conversationList []*model_struct.LocalConversation) error {
@@ -305,12 +305,20 @@ func (d *DataBase) SetConversationDraftDB(ctx context.Context, conversationID, d
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
 	nowTime := utils.GetCurrentTimestampByMill()
-	t := d.conn.WithContext(ctx).Exec("update local_conversations set draft_text=?,draft_text_time=?,latest_msg_send_time=case when latest_msg_send_time=? then ? else latest_msg_send_time  end where conversation_id=?",
-		draftText, nowTime, 0, nowTime, conversationID)
-	if t.RowsAffected == 0 {
-		return errs.WrapMsg(errors.New("RowsAffected == 0"), "no update")
-	}
-	return errs.WrapMsg(t.Error, "SetConversationDraft failed")
+	return d.conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		t := tx.Exec("update local_conversations set draft_text=?,draft_text_time=?,latest_msg_send_time=case when latest_msg_send_time=? then ? else latest_msg_send_time  end where conversation_id=?",
+			draftText, nowTime, 0, nowTime, conversationID)
+		if t.RowsAffected == 0 {
+			return errs.WrapMsg(errors.New("RowsAffected == 0"), "no update")
+		}
+		if t.Error != nil {
+			return errs.WrapMsg(t.Error, "SetConversationDraft failed")
+		}
+		if draftText != "" {
+			return tx.Model(&model_struct.LocalConversationSyncV2Visibility{}).Where("conversation_id = ? AND hidden = ?", conversationID, true).Updates(map[string]interface{}{"hidden": false, "revision": gorm.Expr("revision + 1")}).Error
+		}
+		return nil
+	})
 }
 
 func (d *DataBase) RemoveConversationDraft(ctx context.Context, conversationID, draftText string) error {

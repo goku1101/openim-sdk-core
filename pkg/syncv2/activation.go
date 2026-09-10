@@ -2,6 +2,7 @@ package syncv2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
@@ -21,6 +22,22 @@ func (c *Client) ActivateConversation(ctx context.Context, op, id string, caps *
 	if id == "" || store == nil {
 		return nil, fmt.Errorf("sync v2: invalid activation")
 	}
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := c.activateConversationAttempt(ctx, op, id, caps, store)
+		if err == nil {
+			return current, nil
+		}
+		if !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) || attempt == 2 {
+			return nil, err
+		}
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("sync v2: activation retry exhausted")
+}
+
+func (c *Client) activateConversationAttempt(ctx context.Context, op, id string, caps *pb.Capabilities, store ActivationStore) (*model_struct.LocalConversationSyncV2, error) {
 	before, err := store.GetConversationSyncV2(ctx)
 	if err != nil {
 		return nil, err

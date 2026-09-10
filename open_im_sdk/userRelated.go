@@ -357,11 +357,16 @@ func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
 	u.third = third.NewThird(u.info.PlatformID, u.loginUserID, u.info.SystemType, u.info.LogFilePath, u.file)
 	log.ZDebug(ctx, "forcedSynchronization success...", "login cost time: ", time.Since(t1))
 
-	u.msgSyncer, _ = interaction.NewMsgSyncer(ctx, u.conversationCh, u.msgSyncerCh, u.loginUserID, u.longConnMgr, u.db, 0)
 	u.conversation = conv.NewConversation(ctx, u.longConnMgr, u.db, u.conversationCh, u.msgSyncerCh,
 		u.relation, u.group, u.user, u.file)
 	u.setListener(ctx)
-	if u.conversation.ConfigureConversationSyncV2(ctx) {
+	syncV2Configured := u.conversation.ConfigureConversationSyncV2(ctx)
+	u.msgSyncer, err = interaction.NewMsgSyncer(ctx, u.conversationCh, u.msgSyncerCh, u.loginUserID, u.longConnMgr, u.db, 0, syncV2Configured)
+	if err != nil {
+		_ = u.db.Close(ctx)
+		return sdkerrs.ErrSdkInternal.WrapMsg("initialize message sync " + err.Error())
+	}
+	if syncV2Configured {
 		u.msgSyncer.SetConversationSyncV2(u.conversation.SynchronizeConversationV2)
 		u.msgSyncer.SetConversationSyncV2Push(u.conversation.ProcessConversationSyncV2Push)
 	}

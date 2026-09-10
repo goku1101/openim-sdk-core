@@ -2,9 +2,11 @@ package syncv2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 )
 
@@ -24,6 +26,22 @@ func (c *Client) ReadSequencePage(ctx context.Context, op string, req *pb.PullRe
 			return nil, fmt.Errorf("sync v2: invalid history sequence")
 		}
 	}
+	for attempt := 0; attempt < 3; attempt++ {
+		page, err := c.readSequencePageAttempt(ctx, op, req, caps, store)
+		if err == nil {
+			return page, nil
+		}
+		if !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) || attempt == 2 {
+			return nil, err
+		}
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("sync v2: history retry exhausted")
+}
+
+func (c *Client) readSequencePageAttempt(ctx context.Context, op string, req *pb.PullRequest, caps *pb.Capabilities, store StreamStore) (*SequencePage, error) {
 	before, err := store.GetConversationSyncV2Stream(ctx, req.ConversationID)
 	if err != nil {
 		return nil, err

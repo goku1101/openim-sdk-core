@@ -32,6 +32,7 @@ type conversationSyncV2Store interface {
 	PutConversationSyncV2Retry(context.Context, *model_struct.LocalConversationSyncV2Retry) error
 	ResumeConversationSyncV2Retries(context.Context, int64) error
 	syncv2.CoordinatorStore
+	syncv2.MetadataSubsetStore
 	syncv2.ActivationStore
 	GetConversationSyncV2HistoryPage(context.Context, string, int, int64, int64, string, bool) ([]*model_struct.LocalChatLog, error)
 	FilterConversationSyncV2History(context.Context, string, []*model_struct.LocalChatLog) ([]*model_struct.LocalChatLog, error)
@@ -39,20 +40,27 @@ type conversationSyncV2Store interface {
 	CommitConversationSyncV2History(context.Context, uint64, *model_struct.LocalConversationSyncV2Stream, []*model_struct.LocalChatLog, *pb.State) error
 	GetConversationSyncV2LatestMessage(context.Context, string, int64, int64) ([]*model_struct.LocalChatLog, error)
 	ApplyConversationSyncV2Projection(context.Context, *model_struct.LocalConversationSyncV2, map[string]uint64, []*model_struct.LocalConversation) error
+	GetConversationSyncV2Visibility(context.Context, string) (*model_struct.LocalConversationSyncV2Visibility, error)
+	HideConversationSyncV2(context.Context, string) error
+	RevealConversationSyncV2(context.Context, string, uint64) error
+	UpdateConversationSyncV2LocalPreview(context.Context, string, string, int64) (bool, error)
 	PrepareConversationSyncV2Legacy(context.Context) error
 }
 
 type conversationSyncV2Runtime struct {
-	client    *syncv2.Client
-	store     conversationSyncV2Store
-	mode      atomic.Int32
-	status    atomic.Pointer[sdk_struct.ConversationSyncState]
-	capsMu    sync.RWMutex
-	caps      *pb.Capabilities
-	runMu     sync.Mutex
-	retryMu   sync.Mutex
-	retryDone chan struct{}
-	retryWake chan struct{}
+	client             *syncv2.Client
+	store              conversationSyncV2Store
+	mode               atomic.Int32
+	status             atomic.Pointer[sdk_struct.ConversationSyncState]
+	capsMu             sync.RWMutex
+	caps               *pb.Capabilities
+	runMu              sync.Mutex
+	retryMu            sync.Mutex
+	retryDone          chan struct{}
+	retryWake          chan struct{}
+	metadataMu         sync.Mutex
+	metadataPrevious   map[string]*model_struct.LocalConversation
+	metadataGeneration string
 }
 
 // ConfigureConversationSyncV2 runs once per login before connection workers.
@@ -98,6 +106,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 	failState := func() {
 		state := c.GetConversationSyncState()
 		state.Phase = "failed"
+		state.InitialDataReady = false
 		runtime.status.Store(&state)
 	}
 	defer func() {
@@ -114,7 +123,9 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		Progress: func(value int) {
 			if ctx.Err() == nil && value > lastProgress && value < 100 {
 				lastProgress = value
-				runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "syncing", Progress: value})
+				state := c.GetConversationSyncState()
+				state.Phase, state.Progress = "syncing", value
+				runtime.status.Store(&state)
 				c.ConversationListener().OnSyncServerProgress(value)
 			}
 		},
@@ -143,6 +154,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			}
 			return nil
 		},
+		PrepareInitial: c.prepareConversationSyncV2InitialPage,
 		PrepareRelated: func(ctx context.Context) error {
 			for _, run := range []func(context.Context) error{c.group.SyncAllJoinedGroupsAndMembersWithLock, c.relation.IncrSyncFriendsWithLock, c.user.SyncLoginUserInfoWithoutNotice, c.relation.SyncAllBlackListWithoutNotice} {
 				if err := run(ctx); err != nil {
@@ -219,7 +231,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 	}
 	c.ConversationListener().OnTotalUnreadMessageCountChanged(total)
 	completed = true
-	runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "ready", Progress: 100})
+	runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "ready", Progress: 100, InitialDataReady: true})
 	c.ConversationListener().OnSyncServerProgress(100)
 	c.ConversationListener().OnSyncServerFinish(reinstalled)
 	return true, nil
@@ -228,7 +240,13 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 // Metadata handlers can execute within the conversation queue. Do not acquire
 // runMu here: the round may be waiting for that queue's consumption receipt.
 func (c *Conversation) refreshConversationSyncV2Metadata(ctx context.Context) error {
+	return c.refreshConversationSyncV2MetadataForIDs(ctx, nil)
+}
+
+func (c *Conversation) refreshConversationSyncV2MetadataForIDs(ctx context.Context, affectedIDs []string) error {
 	runtime := c.syncV2
+	runtime.metadataMu.Lock()
+	defer runtime.metadataMu.Unlock()
 	runtime.capsMu.RLock()
 	caps := runtime.caps
 	runtime.capsMu.RUnlock()
@@ -242,11 +260,45 @@ func (c *Conversation) refreshConversationSyncV2Metadata(ctx context.Context) er
 	if err != nil {
 		return err
 	}
+	// Keep the last unpublished baseline across post-commit projection failures.
+	// A new login/snapshot generation starts a separate notification baseline.
+	if runtime.metadataPrevious == nil || runtime.metadataGeneration != checkpoint.Generation {
+		runtime.metadataPrevious = make(map[string]*model_struct.LocalConversation)
+		runtime.metadataGeneration = checkpoint.Generation
+	}
+	for start := 0; start < len(checkpoint.SelectedIDs); start += 300 {
+		rows, err := c.db.GetMultipleConversationDB(ctx, checkpoint.SelectedIDs[start:min(start+300, len(checkpoint.SelectedIDs))])
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if _, exists := runtime.metadataPrevious[row.ConversationID]; !exists {
+				runtime.metadataPrevious[row.ConversationID] = row
+			}
+		}
+	}
 	delta, err := c.getIncrementalConversationFromServer(ctx, checkpoint.Version, checkpoint.VersionID)
 	if err != nil {
 		return err
 	}
-	_, err = runtime.client.ApplyMetadataDelta(ctx, ccontext.Info(ctx).OperationID(), checkpoint, delta, caps, runtime.store)
+	var next *model_struct.LocalConversationSyncV2
+	if len(affectedIDs) > 0 {
+		next, err = runtime.client.ApplyMetadataForIDs(ctx, ccontext.Info(ctx).OperationID(), checkpoint, delta, caps, runtime.store, affectedIDs)
+	} else {
+		next, err = runtime.client.ApplyMetadataDelta(ctx, ccontext.Info(ctx).OperationID(), checkpoint, delta, caps, runtime.store)
+	}
+	if err != nil {
+		return err
+	}
+	for _, id := range next.SelectedIDs {
+		if _, exists := runtime.metadataPrevious[id]; !exists {
+			runtime.metadataPrevious[id] = nil
+		}
+	}
+	err = c.notifyConversationSyncV2Metadata(ctx, runtime.metadataPrevious, next)
+	if err == nil {
+		runtime.metadataPrevious = nil
+	}
 	return err
 }
 
@@ -274,7 +326,6 @@ func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context
 					return err
 				}
 				conversation.LatestMsg = ""
-				conversation.LatestMsgSendTime = 0
 				if len(messages) > 0 {
 					message := LocalChatLogToMsgStruct(messages[0])
 					conversation.LatestMsg = utils.StructToJsonString(message)
