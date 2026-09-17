@@ -17,18 +17,18 @@ type notificationPull struct {
 	done     chan struct{}
 }
 
-// Only the next four first pages are held in memory. Reads use the existing
+// Only the next four non-idle first pages are held in memory. Reads use the existing
 // account admission gate; handlers and durable cursors keep their original order.
 func (c *Client) consumeNotificationsPrefetched(ctx context.Context, op string, ids []string, queries map[string]*pb.PullRequest, states map[string]*pb.State, accepted map[string]*model_struct.LocalConversationSyncV2Stream, caps *pb.Capabilities, store BatchStreamStore, scan func(context.Context, int) error, publish func(int)) error {
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	futures := make([]*notificationPull, len(ids))
-	start := func(i int) {
+	start := func(i int) bool {
 		id := ids[i]
 		stream, state := accepted[id], states[id]
 		if stream == nil || state == nil || len(stream.PendingSeqs) > 0 {
-			return
+			return false
 		}
 		upper := state.MaxSeq
 		if state.PermissionMaxSeq > 0 {
@@ -36,7 +36,7 @@ func (c *Client) consumeNotificationsPrefetched(ctx context.Context, op string, 
 		}
 		lower := max(int64(1), state.MinSeq, stream.ScannedSeq+1)
 		if lower > upper {
-			return
+			return false
 		}
 		q := proto.Clone(queries[id]).(*pb.PullRequest)
 		q.StateToken = stream.StateToken
@@ -55,10 +55,18 @@ func (c *Client) consumeNotificationsPrefetched(ctx context.Context, op string, 
 			defer close(future.done)
 			future.response, future.err = c.PullBatched(ctx, op, q, caps)
 		}()
+		return true
 	}
-	for i := 0; i < min(4, len(ids)); i++ {
-		start(i)
+	next, buffered := 0, 0
+	fill := func() {
+		for next < len(ids) && buffered < 4 {
+			if start(next) {
+				buffered++
+			}
+			next++
+		}
 	}
+	fill()
 	for i, id := range ids {
 		runCtx := ctx
 		if future := futures[i]; future != nil {
@@ -80,11 +88,12 @@ func (c *Client) consumeNotificationsPrefetched(ctx context.Context, op string, 
 		if err := scan(runCtx, i); err != nil {
 			return err
 		}
-		futures[i] = nil
-		publish(i)
-		if i+4 < len(ids) {
-			start(i + 4)
+		if futures[i] != nil {
+			futures[i] = nil
+			buffered--
 		}
+		publish(i)
+		fill()
 	}
 	return nil
 }

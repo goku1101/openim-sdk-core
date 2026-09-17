@@ -95,3 +95,87 @@ func TestNotificationPrefetchOrderAdmissionAndInvalidation(t *testing.T) {
 		})
 	}
 }
+
+func TestNotificationPrefetchSkipsIdleSlots(t *testing.T) {
+	ctx := context.Background()
+	d, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	var pulls atomic.Int32
+	var starved atomic.Bool
+	second := make(chan struct{})
+	state := func(id string) *pb.State {
+		maxSeq := int64(0)
+		if id == "si_a" || id == "si_b" {
+			maxSeq = 1
+		}
+		return &pb.State{ConversationID: "n" + id[2:], Known: true, StateToken: "t", MinSeq: 1, MaxSeq: maxSeq}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var out any
+		switch r.URL.Path {
+		case "/conversation/sync_capabilities":
+			out = &pb.Capabilities{ConversationSyncV2: true, PolicyVersion: syncv2.PolicyVersion, MaxBatchSize: 500, MaxPageSize: 500, MaxRequestBytes: 65536, SnapshotTTLSeconds: 600, ClusterReadAdmission: true}
+		case "/msg/sync_seqs_v2":
+			var q pb.StateRequest
+			json.NewDecoder(r.Body).Decode(&q)
+			s := &pb.StateResponse{}
+			for _, id := range q.ConversationIDs {
+				s.States = append(s.States, state(id))
+			}
+			out = s
+		case "/msg/sync_messages_v2":
+			var q pb.PullRequest
+			json.NewDecoder(r.Body).Decode(&q)
+			if pulls.Add(1) == 2 {
+				close(second)
+			}
+			if q.ConversationID == "si_a" {
+				select {
+				case <-second:
+				case <-time.After(300 * time.Millisecond):
+					starved.Store(true)
+				}
+			}
+			out = &pb.PullResponse{State: state(q.ConversationID), Messages: []*sdkws.MsgData{{ClientMsgID: q.ConversationID, Seq: 1}}}
+		default:
+			t.Errorf("unexpected route %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": out})
+	}))
+	defer server.Close()
+	client := syncv2.NewClient(server.URL, "", server.Client())
+	caps, err := client.Capabilities(ctx, "caps", &pb.UserRequest{UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	result, err := client.SyncStreams(ctx, "sparse", &pb.StateRequest{UserID: "u", Notifications: true, ConversationIDs: []string{"si_a", "si_idle1", "si_idle2", "si_idle3", "si_idle4", "si_b"}}, caps, d, func(ctx context.Context, p *model_struct.LocalConversationSyncV2Stream, msgs []*sdkws.MsgData) error {
+		var seqs []int64
+		for _, m := range msgs {
+			seqs = append(seqs, m.Seq)
+		}
+		if len(msgs) > 0 {
+			order = append(order, p.ConversationID)
+		}
+		return d.CommitConversationSyncV2Notifications(ctx, p.Epoch, p, seqs)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starved.Load() {
+		t.Error("idle streams occupied lookahead slots while a read slot was free")
+	}
+	if pulls.Load() != 2 || result.Completed != 6 || !reflect.DeepEqual(order, []string{"n_a", "n_b"}) {
+		t.Fatalf("pulls=%d result=%+v order=%v", pulls.Load(), result, order)
+	}
+	_, err = client.SyncStreams(ctx, "repeat", &pb.StateRequest{UserID: "u", Notifications: true, ConversationIDs: []string{"si_a", "si_idle1", "si_idle2", "si_idle3", "si_idle4", "si_b"}}, caps, d, func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error {
+		t.Error("unchanged notifications were consumed again")
+		return nil
+	})
+	if err != nil || pulls.Load() != 2 {
+		t.Fatalf("unchanged streams re-pulled: pulls=%d err=%v", pulls.Load(), err)
+	}
+}
