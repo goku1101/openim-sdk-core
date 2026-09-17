@@ -21,6 +21,12 @@ import (
 )
 
 func TestPrioritySnapshotResumesBeforeReadingOldTailAndWarmStartUsesChanges(t *testing.T) {
+	for _, count := range []int32{0, 1} {
+		t.Run(fmt.Sprintf("priority_%d", count), func(t *testing.T) { testPrioritySnapshotResume(t, count) })
+	}
+}
+
+func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 	ctx := context.Background()
 	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
 	if err != nil {
@@ -46,7 +52,7 @@ func TestPrioritySnapshotResumesBeforeReadingOldTailAndWarmStartUsesChanges(t *t
 			p := &pb.SnapshotResponse{SnapshotID: "s", Scope: q.Scope, PolicyVersion: syncv2.PolicyVersion, Mode: "full", VersionID: "v", Version: 1, DirectoryToken: token, ExpiresAt: expiry, BaselineCursor: "base"}
 			if q.Scope == "notifications" {
 				p.Total = 3
-				p.NotificationPriorityCount = 1
+				p.NotificationPriorityCount = priorityCount
 				p.ConversationIDs = []string{"si_a_u", "si_b_u"}
 				p.Cursor = "tail"
 				p.HasMore = true
@@ -126,7 +132,14 @@ func TestPrioritySnapshotResumesBeforeReadingOldTailAndWarmStartUsesChanges(t *t
 			t.Error("missing priority proof")
 		}
 		ready = true
-		return nil
+		// A foreground metadata event advances the live version while the
+		// immutable snapshot must still accept later pages from version 1.
+		current, e := database.GetConversationSyncV2(ctx)
+		if e != nil {
+			return e
+		}
+		current.Version = 9
+		return database.SaveConversationSyncV2(ctx, current)
 	}, Publish: func(context.Context, *model_struct.LocalConversationSyncV2, func(int, int)) error { return nil }, Commit: func(ctx context.Context, p *model_struct.LocalConversationSyncV2Stream, _ []*sdkws.MsgData) error {
 		return database.CommitConversationSyncV2Messages(ctx, p.Epoch, p, nil)
 	}}
