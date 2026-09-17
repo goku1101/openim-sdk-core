@@ -105,10 +105,15 @@ func TestNotificationMemberPermissionAfterLeaving(t *testing.T) {
 				raw, _ := json.Marshal(detail)
 				content, _ := json.Marshal(map[string]string{"detail": string(raw)})
 				err = g.DoNotification(ctx, &sdkws.MsgData{ContentType: kind, Content: content})
-				if memberCalls != 1 {
+				isolated := kind != constant.GroupInfoSetNotification && scenario != "authentication-failed"
+				expectedCalls := 1
+				if isolated {
+					expectedCalls = 2
+				}
+				if memberCalls != expectedCalls {
 					t.Fatalf("member API calls=%d", memberCalls)
 				}
-				if scenario == "left" {
+				if scenario == "left" || isolated {
 					if err != nil {
 						t.Fatalf("obsolete notification stopped sync: %v", err)
 					}

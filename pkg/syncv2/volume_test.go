@@ -107,7 +107,7 @@ func verifyLargeAccountRequestScope(t *testing.T, selected int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(round.Selection.ChatIDs) != selected || chatIDs != selected || notificationIDs != 50000 || selfReads != 1 || snapshotCreates != 1 || releases != 1 {
+	if len(round.Selection.ChatIDs) != selected || chatIDs != selected || notificationIDs != 0 || selfReads != 0 || len(round.Selection.NotificationIDs) != 50000 || !round.Selection.IncludeSelf || snapshotCreates != 1 || releases != 1 {
 		t.Fatalf("scope mismatch: chats=%d notifications=%d self=%d creates=%d releases=%d", chatIDs, notificationIDs, selfReads, snapshotCreates, releases)
 	}
 	for i := 0; i < selected; i++ {

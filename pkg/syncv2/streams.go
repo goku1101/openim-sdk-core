@@ -46,7 +46,7 @@ type StreamResults struct {
 }
 
 // SyncStreams batches state reads and bounds chat pulls to four workers.
-// Notifications and commit callbacks remain sequential. Epochs
+// Notification consumption and commit callbacks remain sequential. Epochs
 // are captured before each network batch, not after it or just before its pull.
 func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateRequest, caps *pb.Capabilities, store BatchStreamStore, commit CommitStream) (*StreamResults, error) {
 	if req == nil || caps == nil || caps.MaxBatchSize <= 0 || caps.MaxRequestBytes <= 0 || store == nil || commit == nil || req.IncludeDetails || req.IncludeSelf && !req.Notifications {
@@ -234,6 +234,7 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				}
 				return nil
 			}
+			var err error
 			var stream *model_struct.LocalConversationSyncV2Stream
 			if preaccepted := accepted[id]; preaccepted != nil {
 				stream, err = c.syncAcceptedStreamState(ctx, op, queries[id], caps, store, serialCommit, preaccepted, states[id])
@@ -270,7 +271,11 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			}
 			advance()
 		}
-		if req.Notifications || len(ids) < 2 {
+		if req.Notifications && len(accepted) > 0 {
+			if err := c.consumeNotificationsPrefetched(ctx, op, ids, queries, states, accepted, caps, store, scan, publish); err != nil {
+				return err
+			}
+		} else if req.Notifications || len(ids) < 2 {
 			for i := range ids {
 				if err := scan(ctx, i); err != nil {
 					return err

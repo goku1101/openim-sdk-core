@@ -19,6 +19,9 @@ func (c *Client) PullBatched(ctx context.Context, op string, req *pb.PullRequest
 	if req.Self && (!req.Notifications || req.ConversationID != "") || !req.Self && req.ConversationID == "" {
 		return nil, fmt.Errorf("sync v2: invalid pull stream")
 	}
+	if cached, ok := ctx.Value(notificationPullKey{}).(*notificationPull); ok && proto.Equal(cached.request, req) {
+		return cached.response, cached.err
+	}
 	result := new(pb.PullResponse)
 	streamID := req.ConversationID
 	if req.Self {

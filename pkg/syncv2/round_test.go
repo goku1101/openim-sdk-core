@@ -55,6 +55,9 @@ func TestPrepareRoundRequestsSelectionAndDoesNotFinishEarly(t *testing.T) {
 		case "/msg/sync_seqs_v2":
 			var req pb.StateRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Notifications {
+				t.Error("unused notification states requested during preparation")
+			}
 			if !req.Notifications {
 				requested = append(requested, req.ConversationIDs...)
 				if !req.IncludeDetails {

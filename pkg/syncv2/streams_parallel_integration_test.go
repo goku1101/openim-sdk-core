@@ -80,7 +80,7 @@ func TestChatStreamsUseBoundedParallelPullsAndSerialCommits(t *testing.T) {
 			if err != nil || got.Completed != 8 {
 				t.Fatalf("incomplete: %+v %v", got, err)
 			}
-			if notifications && peak.Load() != 1 || !notifications && (peak.Load() < 2 || peak.Load() > 4) {
+			if peak.Load() < 2 || peak.Load() > 4 {
 				t.Fatalf("incorrect concurrency: %d", peak.Load())
 			}
 			for _, id := range ids {

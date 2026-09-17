@@ -52,12 +52,11 @@ func commitPreparedDetails(ctx context.Context, round *Round, store DetailsStore
 // Round contains network results awaiting the conversation/message consumers.
 // Preparing it must not advance their committed metadata or message cursors.
 type Round struct {
-	Enabled            bool
-	Capabilities       *pb.Capabilities
-	Selection          *Selection
-	ChatStates         *pb.StateResponse
-	NotificationStates *pb.StateResponse
-	Checkpoint         *model_struct.LocalConversationSyncV2
+	Enabled      bool
+	Capabilities *pb.Capabilities
+	Selection    *Selection
+	ChatStates   *pb.StateResponse
+	Checkpoint   *model_struct.LocalConversationSyncV2
 }
 
 func (c *Client) PrepareRound(ctx context.Context, op, userID string, store RoundStore) (*Round, error) {
@@ -126,9 +125,7 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	if err != nil {
 		return nil, err
 	}
-	notifications, err := c.StatesBatched(stateContext("notification_states", "streams", 6, 9), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.NotificationIDs, Notifications: true, IncludeSelf: selection.IncludeSelf}, caps)
-	if err != nil {
-		return nil, err
-	}
-	return &Round{Enabled: true, Capabilities: caps, Selection: selection, ChatStates: chat, NotificationStates: notifications, Checkpoint: checkpoint}, nil
+	// Notification states are fetched immediately before consumption. Preparing
+	// a second, unused copy here adds an account-wide network pass on cold login.
+	return &Round{Enabled: true, Capabilities: caps, Selection: selection, ChatStates: chat, Checkpoint: checkpoint}, nil
 }

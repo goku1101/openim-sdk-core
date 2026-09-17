@@ -106,29 +106,25 @@ func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string
 			}
 			groups = append(groups, &req)
 		}
-		groupVersion, err := g.getIncrementalGroupMemberBatch(ctx, groups)
+		groupVersion, err := g.getAccessibleGroupMemberBatch(ctx, groups)
 		if err != nil {
 			return err
 		}
-		if len(groupVersion) == 0 {
-			for _, req := range groups {
-				if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
-					progress.complete(ctx)
+		for _, req := range groups {
+			resp := groupVersion[req.GroupID]
+			if resp == nil {
+				if err := g.clearUnavailableGroup(ctx, req.GroupID); err != nil {
+					return err
 				}
-				delete(groupIDSet, req.GroupID)
-			}
-			continue
-		}
-		groups = groups[:0]
-		for groupID, resp := range groupVersion {
-			if err := g.syncGroupAndMember(ctx, groupID, resp); err != nil {
+			} else if err := g.syncGroupAndMember(ctx, req.GroupID, resp); err != nil {
 				return err
 			}
 			if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
 				progress.complete(ctx)
 			}
-			delete(groupIDSet, groupID)
+			delete(groupIDSet, req.GroupID)
 		}
+		groups = groups[:0]
 	}
 }
 
