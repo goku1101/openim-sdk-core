@@ -93,10 +93,12 @@ func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 	runContext := common.WithSyncV2Background(ctx, func() { once.Do(func() { close(ready) }) })
 	done := make(chan bool, 1)
 	reinstalled := m.reinstalled
+	failed := false
 	go func() {
 		handled, err := m.conversationSyncV2(runContext, reinstalled)
 		if err != nil {
 			log.ZWarn(ctx, "conversation sync V2 failed", err)
+			failed = true
 			done <- true // An error must never select legacy synchronization.
 			return
 		}
@@ -112,7 +114,7 @@ func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 	case <-ctx.Done():
 		return true
 	}
-	if handled {
+	if handled && !failed {
 		m.reinstalled = false
 	}
 	if !handled {

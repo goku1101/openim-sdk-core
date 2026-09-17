@@ -321,7 +321,8 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		window = 1
 	}
 	syncContext := syncv2.WithChatWindow(ctx, window)
-	for attempt := 0; attempt < 2; attempt++ {
+	tailRetry := 0
+	for attempt := 0; ; attempt++ {
 		result, err = runtime.client.Synchronize(syncContext, ccontext.Info(ctx).OperationID(), c.loginUserID, runtime.store, hooks)
 		if err == nil {
 			break
@@ -329,10 +330,20 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		log.ZWarn(ctx, "sync v2 synchronization failed", err, "attempt", attempt+1)
 		action := syncv2.RecoveryFor(err)
 		hooks.ForceSnapshot = action == syncv2.RebuildSnapshot
-		if attempt == 1 || ctx.Err() != nil || action != syncv2.RebuildSnapshot && action != syncv2.RefreshState && action != syncv2.Retry && action != syncv2.Renegotiate {
+		backgroundRetry := c.GetConversationSyncState().PriorityReady && (action == syncv2.Retry || action == syncv2.RefreshState)
+		if ctx.Err() != nil || (!backgroundRetry && (attempt >= 1 || action != syncv2.RebuildSnapshot && action != syncv2.RefreshState && action != syncv2.Retry && action != syncv2.Renegotiate)) {
 			break
 		}
-		timer := time.NewTimer(time.Second)
+		delay := time.Second
+		if backgroundRetry {
+			tailRetry++
+			delay *= time.Duration(1 << min(tailRetry, 5))
+			if runHeld {
+				runtime.releaseRun()
+				runHeld = false
+			}
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
