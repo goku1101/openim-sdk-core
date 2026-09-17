@@ -4,6 +4,7 @@ package sdk_struct
 // Login status and readable local resources are not evidence of sync completion.
 type ConversationSyncState struct {
 	UserID           string                  `json:"userID"`
+	PriorityReady    bool                    `json:"priorityReady"`
 	InitialDataReady bool                    `json:"initialDataReady"`
 	Mode             string                  `json:"mode"`
 	Phase            string                  `json:"phase"`

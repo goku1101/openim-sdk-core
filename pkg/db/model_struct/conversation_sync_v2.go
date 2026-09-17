@@ -4,6 +4,7 @@ package model_struct
 // does not replace legacy UIDList or authorize deletion of local conversations.
 // Incomplete snapshots are rebuilt; detail/message stages can replay idempotently.
 type LocalConversationSyncV2 struct {
+	NotificationTask *ConversationSyncV2Task `gorm:"column:notification_task;serializer:json"`
 	// Recovery tokens are opaque and belong to this account and server domain.
 	ChangeCursor          string            `gorm:"column:change_cursor"`
 	ChangeUntilCursor     string            `gorm:"column:change_until_cursor"`
@@ -69,4 +70,35 @@ type LocalConversationSyncV2Visibility struct {
 
 func (LocalConversationSyncV2Visibility) TableName() string {
 	return "local_conversation_sync_v2_visibility"
+}
+
+// ConversationSyncV2Task holds opaque resume data in the account database only.
+// The current page is retained until all its durable stream commits complete.
+type ConversationSyncV2Task struct {
+	SnapshotVersion       uint64
+	SnapshotVersionID     string
+	BaselineCursor        string
+	DirectoryToken        string
+	ExpiresAt             int64
+	Mode                  string
+	PriorityCount         int
+	PriorityReady         bool
+	SelfDone              bool
+	NotificationsDone     bool
+	ChatsDone             bool
+	NotificationCursor    string
+	ChatCursor            string
+	NotificationProcessed int
+	ChatProcessed         int
+	NotificationTotal     int
+	ChatTotal             int
+	Status                string
+	Page                  *ConversationSyncV2TaskPage
+}
+type ConversationSyncV2TaskPage struct {
+	Scope   string
+	IDs     []string
+	Cursor  string
+	HasMore bool
+	Offset  int
 }

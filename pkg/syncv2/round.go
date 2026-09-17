@@ -52,11 +52,12 @@ func commitPreparedDetails(ctx context.Context, round *Round, store DetailsStore
 // Round contains network results awaiting the conversation/message consumers.
 // Preparing it must not advance their committed metadata or message cursors.
 type Round struct {
-	Enabled      bool
-	Capabilities *pb.Capabilities
-	Selection    *Selection
-	ChatStates   *pb.StateResponse
-	Checkpoint   *model_struct.LocalConversationSyncV2
+	PriorityComplete bool
+	Enabled          bool
+	Capabilities     *pb.Capabilities
+	Selection        *Selection
+	ChatStates       *pb.StateResponse
+	Checkpoint       *model_struct.LocalConversationSyncV2
 }
 
 func (c *Client) PrepareRound(ctx context.Context, op, userID string, store RoundStore) (*Round, error) {

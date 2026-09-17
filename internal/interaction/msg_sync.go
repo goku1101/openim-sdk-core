@@ -59,6 +59,7 @@ type MsgSyncer struct {
 	reinstalled            bool                  //true if the app was uninstalled and reinstalled
 	isSyncing              bool                  // indicates whether data is being synced
 	isSyncingLock          sync.Mutex            // lock for syncing state
+	v2BackgroundDone       <-chan bool
 	conversationSyncV2     func(context.Context, bool) (bool, error)
 	conversationSyncV2Push func(context.Context, *sdkws.PushMessages) (bool, error)
 }
@@ -79,9 +80,36 @@ func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 	if m.conversationSyncV2 == nil {
 		return !m.ensureLegacySeq(ctx)
 	}
-	handled, err := m.conversationSyncV2(ctx, m.reinstalled)
-	if err != nil {
-		log.ZWarn(ctx, "conversation sync V2 failed", err)
+	if m.v2BackgroundDone != nil {
+		select {
+		case <-m.v2BackgroundDone:
+			m.v2BackgroundDone = nil
+		default:
+			return true
+		}
+	}
+	ready := make(chan struct{})
+	var once sync.Once
+	runContext := common.WithSyncV2Background(ctx, func() { once.Do(func() { close(ready) }) })
+	done := make(chan bool, 1)
+	reinstalled := m.reinstalled
+	go func() {
+		handled, err := m.conversationSyncV2(runContext, reinstalled)
+		if err != nil {
+			log.ZWarn(ctx, "conversation sync V2 failed", err)
+			done <- true // An error must never select legacy synchronization.
+			return
+		}
+		done <- handled
+	}()
+	var handled bool
+	select {
+	case handled = <-done:
+	case <-ready:
+		m.v2BackgroundDone = done
+		m.reinstalled = false
+		return true
+	case <-ctx.Done():
 		return true
 	}
 	if handled {

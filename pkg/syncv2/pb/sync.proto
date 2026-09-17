@@ -23,6 +23,13 @@ message Capabilities {
   string syncDomainID = 12;
   int64 changeRetentionSeconds = 13;
   int32 maxChangePageSize = 14;
+  // The server can place a bounded, first-ready notification prefix at the
+  // beginning of a full notification snapshot without truncating the tail.
+  bool notificationPriorityPrefix = 15;
+  int32 maxNotificationPriority = 16;
+  // State batches can validate the stable fingerprint of the directory that
+  // produced their IDs. A mismatch fails before stale work is consumed.
+  bool directoryTokenGuard = 17;
 }
 message SnapshotRequest {
   string userID = 1;
@@ -31,6 +38,9 @@ message SnapshotRequest {
   int32 pageSize = 4;
   // "chat" or "notifications". Notification pages contain parent conversation IDs.
   string scope = 5;
+  // Creation-only opt-in. The full notification directory remains pageable,
+  // but its bounded priority prefix is returned first.
+  bool notificationPriorityPrefix = 6;
 }
 message SnapshotResponse {
   string snapshotID = 1;
@@ -49,6 +59,11 @@ message SnapshotResponse {
   // Durable cross-session cursor captured before the snapshot scan. Empty for
   // deployments that have not advertised incrementalRecovery.
   string baselineCursor = 13;
+  // Number of leading notification IDs that form the first-ready prefix.
+  // Zero for chat pages and snapshots created without the opt-in flag.
+  int32 notificationPriorityCount = 14;
+  // Stable fingerprint of the complete sorted owner-conversation ID set.
+  string directoryToken = 15;
 }
 message StateRequest {
   string userID = 1;
@@ -56,6 +71,9 @@ message StateRequest {
   bool includeDetails = 3;
   bool notifications = 4;
   bool includeSelf = 5;
+  // Optional fingerprint returned by the snapshot that produced these IDs.
+  // A mismatch rejects the whole batch before any per-stream state read.
+  string expectedDirectoryToken = 6;
 }
 message State {
   string conversationID = 1;

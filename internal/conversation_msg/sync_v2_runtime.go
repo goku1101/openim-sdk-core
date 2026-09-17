@@ -151,6 +151,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		state := c.GetConversationSyncState()
 		state.Phase = "failed"
 		state.InitialDataReady = false
+		state.PriorityReady = false
 		runtime.status.Store(&state)
 	}
 	defer func() {
@@ -261,6 +262,14 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			}
 			return nil
 		},
+		Background: func(ctx context.Context) error {
+			common.NotifySyncV2Background(ctx)
+			if runHeld {
+				runtime.releaseRun()
+				runHeld = false
+			}
+			return ctx.Err()
+		},
 		PrepareInitial: c.prepareConversationSyncV2InitialPage,
 		PrepareCached: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
@@ -268,6 +277,11 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			}
 			state := c.GetConversationSyncState()
 			state.InitialDataReady = true
+			checkpoint, err := runtime.store.GetConversationSyncV2(ctx)
+			if err != nil {
+				return err
+			}
+			state.PriorityReady = checkpoint.NotificationTask != nil && checkpoint.NotificationTask.PriorityReady
 			runtime.status.Store(&state)
 			c.ConversationListener().OnSyncServerProgress(state.Progress)
 			return nil
@@ -275,8 +289,10 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		PrepareRelated: func(ctx context.Context) error {
 			// Related directories do not own the conversation checkpoint. Keep
 			// one background round, but let explicit conversation work proceed.
-			runtime.releaseRun()
-			runHeld = false
+			if runHeld {
+				runtime.releaseRun()
+				runHeld = false
+			}
 			var relatedErr error
 			for index, run := range []func(context.Context) error{c.group.SyncAllJoinedGroupsAndMembersWithLock, c.relation.IncrSyncFriendsWithLock, c.user.SyncLoginUserInfoWithoutNotice, c.relation.SyncAllBlackListWithoutNotice} {
 				syncv2.ReportDetailProgress(ctx, []string{"groups", "friends", "profile", "blacklist"}[index], "", 0, nil)

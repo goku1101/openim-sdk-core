@@ -25,6 +25,7 @@ type CoordinatorStore interface {
 // The caller owns start/failure/finish notifications; finish follows success.
 type CoordinatorHooks struct {
 	// Used only after a classified server error requires a fresh snapshot.
+	Background     func(context.Context) error
 	ForceSnapshot  bool
 	PersistPending func(context.Context, *SyncResult) error
 	PrepareInitial func(context.Context, *Round) error
@@ -91,7 +92,7 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	}
 	validRecoveryCheckpoint := caps.IncrementalRecovery && !hooks.ForceSnapshot && checkpointBefore != nil && checkpointBefore.UserID == userID && checkpointBefore.PolicyVersion == PolicyVersion && checkpointBefore.SyncDomainID == caps.SyncDomainID && checkpointBefore.RecoveryVersion == caps.IncrementalRecoveryVersion && checkpointBefore.ChangeCursor != "" && checkpointBefore.Generation != "" && checkpointBefore.VersionID != "" && (checkpointBefore.Stage == "ready" || checkpointBefore.Stage == "messages")
 	if validRecoveryCheckpoint {
-		if hooks.PrepareCached != nil {
+		if hooks.PrepareCached != nil && (checkpointBefore.RecoveryBaselineReady || checkpointBefore.NotificationTask == nil) {
 			if err = hooks.PrepareCached(ctx); err != nil {
 				return nil, err
 			}
@@ -107,11 +108,14 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 			return c.recoverChanges(ctx, op, checkpointBefore, caps, store, hooks)
 		}
 	}
+	if caps.NotificationPriorityPrefix && caps.DirectoryTokenGuard && caps.IncrementalRecovery {
+		return c.synchronizePriority(ctx, op, userID, store, hooks, caps, checkpointBefore)
+	}
 	// A committed details checkpoint already owns the snapshot selection and
 	// C0. Interrupted initial message consumption resumes that baseline; only
 	// completion permits the changes-only fast path.
-	resumeBaseline := validRecoveryCheckpoint && !checkpointBefore.RecoveryBaselineReady
-	resume := resumeBaseline || !caps.IncrementalRecovery && !hooks.ForceSnapshot && err == nil && checkpointBefore != nil && checkpointBefore.UserID == userID && checkpointBefore.PolicyVersion == PolicyVersion && checkpointBefore.Generation != "" && checkpointBefore.VersionID != "" && (checkpointBefore.Stage == "ready" || checkpointBefore.Stage == "messages" || checkpointBefore.Stage == "catchup")
+	resumeBaseline := validRecoveryCheckpoint && !checkpointBefore.RecoveryBaselineReady && checkpointBefore.NotificationTask == nil
+	resume := resumeBaseline || !caps.IncrementalRecovery && !hooks.ForceSnapshot && err == nil && checkpointBefore != nil && checkpointBefore.NotificationTask == nil && checkpointBefore.UserID == userID && checkpointBefore.PolicyVersion == PolicyVersion && checkpointBefore.Generation != "" && checkpointBefore.VersionID != "" && (checkpointBefore.Stage == "ready" || checkpointBefore.Stage == "messages" || checkpointBefore.Stage == "catchup")
 	if resume && !resumeBaseline {
 		delta, readErr := hooks.ReadMetadata(ctx, checkpointBefore.Version, checkpointBefore.VersionID)
 		if readErr != nil {

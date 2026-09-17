@@ -10,7 +10,7 @@ import (
 )
 
 // Prepare a readable first page before the full related-data/history catchup.
-// This does not emit OnSyncServerFinish or open the application's write gate.
+// Priority readiness is separate from the full OnSyncServerFinish callback.
 func (c *Conversation) prepareConversationSyncV2InitialPage(ctx context.Context, round *syncv2.Round) error {
 	const pageSize = 50
 	drafts := make(map[string]int64)
@@ -26,18 +26,20 @@ func (c *Conversation) prepareConversationSyncV2InitialPage(ctx context.Context,
 	}
 	initialIDs := syncv2.InitialPageIDs(round.ChatStates.States, drafts, pageSize)
 	op := ccontext.Info(ctx).OperationID()
-	notifications, err := c.syncV2.client.SyncStreams(ctx, op, &pb.StateRequest{UserID: c.loginUserID, ConversationIDs: initialIDs, Notifications: true, IncludeSelf: true}, round.Capabilities, c.syncV2.store, c.ConsumeConversationSyncV2)
-	if err != nil {
-		return err
-	}
-	if len(notifications.PendingIDs) > 0 || len(notifications.UnavailableIDs) > 0 {
-		return nil // Unconfirmed notification boundaries must wait for full sync.
+	if !round.PriorityComplete {
+		notifications, err := c.syncV2.client.SyncStreams(ctx, op, &pb.StateRequest{UserID: c.loginUserID, ConversationIDs: initialIDs, Notifications: true, IncludeSelf: true}, round.Capabilities, c.syncV2.store, c.ConsumeConversationSyncV2)
+		if err != nil {
+			return err
+		}
+		if len(notifications.PendingIDs) > 0 || len(notifications.UnavailableIDs) > 0 {
+			return nil // Unconfirmed notification boundaries must wait for full sync.
+		}
 	}
 	chats, err := c.syncV2.client.SyncStreams(ctx, op, &pb.StateRequest{UserID: c.loginUserID, ConversationIDs: initialIDs}, round.Capabilities, c.syncV2.store, c.ConsumeConversationSyncV2)
 	if err != nil {
 		return err
 	}
-	if len(chats.PendingIDs) > 0 || len(chats.UnavailableIDs) > 0 {
+	if !round.PriorityComplete && (len(chats.PendingIDs) > 0 || len(chats.UnavailableIDs) > 0) {
 		return nil
 	}
 	current, err := c.syncV2.store.GetConversationSyncV2(ctx)
@@ -46,6 +48,11 @@ func (c *Conversation) prepareConversationSyncV2InitialPage(ctx context.Context,
 	}
 	if current.Generation != round.Checkpoint.Generation {
 		return fmt.Errorf("sync v2: initial page superseded")
+	}
+	if round.PriorityComplete {
+		if err := c.persistConversationSyncV2Pending(ctx, &syncv2.SyncResult{Enabled: true, Capabilities: round.Capabilities, Checkpoint: current, Chats: chats}); err != nil {
+			return err
+		}
 	}
 	projection := *current
 	projection.SelectedIDs = initialIDs
@@ -57,6 +64,7 @@ func (c *Conversation) prepareConversationSyncV2InitialPage(ctx context.Context,
 	}
 	state := c.GetConversationSyncState()
 	state.InitialDataReady = true
+	state.PriorityReady = round.PriorityComplete
 	c.syncV2.status.Store(&state)
 	// The unchanged percentage prompts listeners to read the separate native flag.
 	c.ConversationListener().OnSyncServerProgress(state.Progress)
