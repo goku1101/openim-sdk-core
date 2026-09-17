@@ -15,7 +15,7 @@ import (
 )
 
 func (d *DataBase) PutConversationSyncV2Retry(ctx context.Context, job *model_struct.LocalConversationSyncV2Retry) error {
-	if job == nil || job.TaskID == "" || job.DueAt < 0 || !json.Valid([]byte(job.Payload)) || job.Kind != "push" && job.Kind != "reconcile" && job.Kind != "synchronize" {
+	if job == nil || job.TaskID == "" || job.DueAt < 0 || !json.Valid([]byte(job.Payload)) || job.Kind != "push" && job.Kind != "reconcile" && job.Kind != "synchronize" && job.Kind != "state" {
 		return fmt.Errorf("sync v2: invalid retry task")
 	}
 	row := *job
@@ -26,8 +26,10 @@ func (d *DataBase) PutConversationSyncV2Retry(ctx context.Context, job *model_st
 	return d.conn.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "task_id"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"kind": row.Kind, "payload": row.Payload, "due_at": row.DueAt,
-			"revision": gorm.Expr("revision + 1"), "attempts": 0,
+			"kind": row.Kind, "payload": row.Payload,
+			"due_at":   gorm.Expr("CASE WHEN kind IN ('reconcile', 'state') AND excluded.kind = kind AND excluded.payload = payload THEN due_at ELSE excluded.due_at END"),
+			"revision": gorm.Expr("revision + 1"),
+			"attempts": gorm.Expr("CASE WHEN kind IN ('reconcile', 'state') AND excluded.kind = kind AND excluded.payload = payload THEN attempts ELSE 0 END"),
 		}),
 	}).Create(&row).Error
 }

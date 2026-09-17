@@ -136,3 +136,51 @@ func TestSyncV2RetryPayloadPruningPreservesNewerWork(t *testing.T) {
 		t.Fatal("current worker could not acknowledge pruned task")
 	}
 }
+
+func TestUnchangedReconcileRetainsBackoffAfterRestart(t *testing.T) {
+	for _, kind := range []string{"reconcile", "state"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			d, err := NewDataBase(ctx, "u", dir, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := &model_struct.LocalConversationSyncV2Retry{TaskID: "reconcile-c", Kind: kind, Payload: `{"conversationID":"c"}`, DueAt: 100}
+			if err = d.PutConversationSyncV2Retry(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			old, err := d.NextConversationSyncV2Retry(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = d.RescheduleConversationSyncV2Retry(ctx, old, 10000); err != nil {
+				t.Fatal(err)
+			}
+			old, err = d.NextConversationSyncV2Retry(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = d.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			d, err = NewDataBase(ctx, "u", dir, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close(ctx)
+			job.DueAt = 200
+			if err = d.PutConversationSyncV2Retry(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			if err = d.AcknowledgeConversationSyncV2Retry(ctx, old); err != nil {
+				t.Fatal(err)
+			}
+			next, err := d.NextConversationSyncV2Retry(ctx)
+			if err != nil || next == nil || next.DueAt != 10000 || next.Attempts != 1 || next.Revision <= old.Revision {
+				t.Fatalf("restart reset retry backoff or accepted stale ack: %v %v", next, err)
+			}
+
+		})
+	}
+}

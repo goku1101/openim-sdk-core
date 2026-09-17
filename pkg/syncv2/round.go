@@ -89,6 +89,14 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	}
 	// Local history remains in its own tables. A new round requests only the
 	// server selection; explicit activation can extend this round independently.
+	if caps.IncrementalRecovery {
+		if selection.BaselineCursor == "" {
+			return nil, fmt.Errorf("sync v2: missing recovery baseline")
+		}
+		checkpoint.ChangeCursor = selection.BaselineCursor
+		checkpoint.SyncDomainID = caps.SyncDomainID
+		checkpoint.RecoveryVersion = caps.IncrementalRecoveryVersion
+	}
 	checkpoint.SelectedIDs = selection.ChatIDs
 	checkpoint.SnapshotID = selection.SnapshotID
 	checkpoint.NotificationIDs = selection.NotificationIDs

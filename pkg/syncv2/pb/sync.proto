@@ -12,6 +12,17 @@ message Capabilities {
   int32 maxPageSize = 4;
   int32 snapshotTTLSeconds = 5;
   int32 maxRequestBytes = 6;
+  // Supports bounded progressive scanning, not an immutable snapshot or delta log.
+  bool progressiveScan = 7;
+  int32 maxScanPageSize = 8;
+  bool clusterReadAdmission = 9;
+  // Advertised only when every required writer, the durable change log and
+  // the request-time publication barrier are ready for this data domain.
+  bool incrementalRecovery = 10;
+  string incrementalRecoveryVersion = 11;
+  string syncDomainID = 12;
+  int64 changeRetentionSeconds = 13;
+  int32 maxChangePageSize = 14;
 }
 message SnapshotRequest {
   string userID = 1;
@@ -35,6 +46,9 @@ message SnapshotResponse {
   string scope = 11;
   // Fetch the authenticated user's self-notification stream on the first notification page.
   bool includeSelf = 12;
+  // Durable cross-session cursor captured before the snapshot scan. Empty for
+  // deployments that have not advertised incrementalRecovery.
+  string baselineCursor = 13;
 }
 message StateRequest {
   string userID = 1;
@@ -80,6 +94,88 @@ message PullResponse {
 }
 message ReleaseRequest { string userID = 1; string snapshotID = 2; }
 message ReleaseResponse {}
+message ScanRequest {
+  string userID = 1;
+  string cursor = 2;
+  int32 pageSize = 3;
+  // chat: filter each candidate page; history/notifications: all owned parent IDs.
+  string scope = 4;
+}
+message ScanResponse {
+  repeated string conversationIDs = 1;
+  string cursor = 2;
+  bool hasMore = 3;
+  // Candidate count, not selected count. Empty selected pages may have more.
+  int32 scanned = 4;
+  int64 expiresAt = 5;
+  string policyVersion = 6;
+  string scope = 7;
+  string versionID = 8;
+  uint64 version = 9;
+  bool includeSelf = 10;
+  // Always true. This endpoint must not be treated as a fixed snapshot.
+  bool live = 11;
+}
+message ChangeRequest {
+  string userID = 1;
+  string cursor = 2;
+  int32 pageSize = 3;
+  // Empty on the first page. Continuations must echo the fixed value returned
+  // by the first response so an active account can finish a bounded round.
+  string untilCursor = 4;
+}
+message Change {
+  string eventCursor = 1;
+  // "chat", "notification", or "self".
+  string streamKind = 2;
+  // Parent conversation ID. Empty only when streamKind is "self".
+  string conversationID = 3;
+  // Stable, additive reason names. They are hints to reread authoritative
+  // state and never grant access or act as deletion tombstones by themselves.
+  repeated string reasons = 4;
+}
+message ChangeResponse {
+  repeated Change changes = 1;
+  string nextCursor = 2;
+  string untilCursor = 3;
+  bool hasMore = 4;
+  bool caughtUp = 5;
+  string syncDomainID = 6;
+}
+
+// Group-member V2 is additive. Legacy group RPCs keep their existing complete
+// list semantics for old SDKs, while capable SDKs opt into bounded reads.
+message GroupMemberCapabilitiesRequest { string userID = 1; }
+message GroupMemberCapabilities {
+  bool partialMemberSync = 1;
+  bool memberDirectoryV2 = 2;
+  int32 largeGroupThreshold = 3;
+  int32 maxPageSize = 4;
+  string protocolVersion = 5;
+}
+message GroupMemberPageRequest {
+  string groupID = 1;
+  int32 filter = 2;
+  int32 pageSize = 3;
+  string cursor = 4;
+  // Literal, case-sensitive nickname prefix. Empty lists all matching roles.
+  string keyword = 5;
+  int64 joinTimeBegin = 6;
+  int64 joinTimeEnd = 7;
+  repeated string excludeUserIDs = 8;
+  bool orderByJoinTimeDesc = 9;
+}
+message GroupMemberPageResponse {
+  repeated openim.sdkws.GroupMemberFullInfo members = 1;
+  string nextCursor = 2;
+  bool hasMore = 3;
+  uint32 total = 4;
+  string versionID = 5;
+  uint64 version = 6;
+  // Pages are a live directory view; clients must de-duplicate by userID.
+  bool live = 7;
+  bool totalKnown = 8;
+}
 service MessageSync {
   rpc Probe(UserRequest) returns (Capabilities);
   rpc States(StateRequest) returns (StateResponse);
@@ -89,4 +185,10 @@ service ConversationSync {
   rpc Probe(UserRequest) returns (Capabilities);
   rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc Changes(ChangeRequest) returns (ChangeResponse);
+}
+service GroupMemberSync {
+  rpc Probe(GroupMemberCapabilitiesRequest) returns (GroupMemberCapabilities);
+  rpc Page(GroupMemberPageRequest) returns (GroupMemberPageResponse);
 }

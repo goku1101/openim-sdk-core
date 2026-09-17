@@ -131,8 +131,12 @@ func TestSyncV2HistoryEntryDoesNotInventDeletedMessagesOrFalseEnd(t *testing.T) 
 	}
 
 	publicResult, err := c.getAdvancedHistoryMessageList(ctx, sdk.GetAdvancedHistoryMessageListParams{ConversationID: "c", Count: 20}, false)
-	if err != nil || publicResult.ErrCode == 0 || publicResult.IsEnd {
-		t.Fatalf("public history lost pending state: %+v %v", publicResult, err)
+	if err != nil || publicResult.ErrCode != 0 || publicResult.IsEnd || len(publicResult.MessageList) != 1 || publicResult.MessageList[0].Seq != 3 {
+		t.Fatalf("public history discarded authorized partial messages: %+v %v", publicResult, err)
+	}
+	stream, err = database.GetConversationSyncV2Stream(ctx, "c")
+	if err != nil || len(stream.PendingSeqs) != 1 || stream.PendingSeqs[0] != 2 {
+		t.Fatal("partial delivery lost pending sequence")
 	}
 
 	if err = database.DeleteConversationAllMessages(ctx, "c"); err != nil {
@@ -140,8 +144,13 @@ func TestSyncV2HistoryEntryDoesNotInventDeletedMessagesOrFalseEnd(t *testing.T) 
 	}
 	allPending.Store(true)
 	publicResult, err = c.getAdvancedHistoryMessageList(ctx, sdk.GetAdvancedHistoryMessageListParams{ConversationID: "c", Count: 20}, false)
-	if err != nil || publicResult.ErrCode == 0 || publicResult.IsEnd {
-		t.Fatalf("empty pending page reported history end: %+v %v", publicResult, err)
+	if err != nil || publicResult.ErrCode != 0 || publicResult.IsEnd || len(publicResult.MessageList) != 0 {
+		t.Fatalf("authorized pending page should be empty without an error or false end: %+v %v", publicResult, err)
+	}
+
+	stream, err = database.GetConversationSyncV2Stream(ctx, "c")
+	if err != nil || !reflect.DeepEqual(stream.PendingSeqs, []int64{2, 3}) {
+		t.Fatalf("empty page lost durable holes: %+v %v", stream, err)
 	}
 
 	beforeClear, err := database.GetConversationSyncV2Stream(ctx, "c")

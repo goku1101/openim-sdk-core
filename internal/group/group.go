@@ -16,6 +16,8 @@ package group
 
 import (
 	"context"
+	lru "github.com/hashicorp/golang-lru/v2"
+	"golang.org/x/sync/singleflight"
 	"sync"
 	"time"
 
@@ -53,12 +55,18 @@ func NewGroup(loginUserID string, db db_interface.DataBase,
 		filter:         NewNotificationFilter(NotificationFilterCacheSize, NotificationFilterTimeout),
 	}
 	g.initSyncer()
-	g.groupMemberCache = cache.NewCache[string, *model_struct.LocalGroupMember]()
+	g.groupMemberCache = newMemberProfileCache()
+	g.memberDirectory = newMemberDirectory()
 	g.groupInfoCache = cache.NewCache[string, *model_struct.LocalGroup]()
+	g.displayQuerySlot = make(chan struct{}, 1)
+	g.displayMisses, _ = lru.New[string, time.Time](4096)
 	return g
 }
 
 type Group struct {
+	memberLookup                  singleflight.Group
+	memberLookupOnce              sync.Once
+	memberLookupSlot              chan struct{}
 	conversationSyncV2Invalidator func(context.Context, string) error
 	listener                      func() open_im_sdk_callback.OnGroupListener
 	loginUserID                   string
@@ -68,9 +76,13 @@ type Group struct {
 	conversationCh                chan common.Cmd2Value
 	groupSyncMutex                sync.Mutex
 	listenerForService            open_im_sdk_callback.OnListenerForService
-	groupMemberCache              *cache.Cache[string, *model_struct.LocalGroupMember]
+	groupMemberCache              *memberProfileCache
+	memberDirectory               *memberDirectory
 	groupInfoCache                *cache.Cache[string, *model_struct.LocalGroup]
 	filter                        *NotificationFilter
+	displayQuerySlot              chan struct{}
+	displayRetryAt                time.Time // guarded by displayQuerySlot
+	displayMisses                 *lru.Cache[string, time.Time]
 }
 
 func (g *Group) initSyncer() {
@@ -88,6 +100,10 @@ func (g *Group) initSyncer() {
 			}
 			g.groupInfoCache.Delete(value.GroupID)
 			if err := g.db.DeleteGroupAllMembers(ctx, value.GroupID); err != nil {
+				return err
+			}
+			g.invalidateMemberDirectory(value.GroupID)
+			if err := g.db.DeleteVersionSync(ctx, partialMemberTable, value.GroupID); err != nil {
 				return err
 			}
 			if err := g.db.DeleteVersionSync(ctx, g.groupAndMemberVersionTableName(), value.GroupID); err != nil {
@@ -126,6 +142,13 @@ func (g *Group) initSyncer() {
 				log.ZInfo(ctx, "groupSyncer trigger update", "groupID",
 					server.GroupID, "data", server, "isDismissed", server.Status == constant.GroupStatusDismissed)
 				if server.Status == constant.GroupStatusDismissed {
+					g.invalidateMemberDirectory(server.GroupID)
+					if err := g.db.DeleteVersionSync(ctx, partialMemberTable, server.GroupID); err != nil {
+						return err
+					}
+					if err := g.db.DeleteVersionSync(ctx, g.groupAndMemberVersionTableName(), server.GroupID); err != nil {
+						return err
+					}
 					if err := g.db.DeleteGroupAllMembers(ctx, server.GroupID); err != nil {
 						log.ZError(ctx, "delete group all members failed", err)
 					}

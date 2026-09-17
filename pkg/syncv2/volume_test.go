@@ -15,7 +15,7 @@ import (
 // Covers the backend fixture, SDK plan and empty chat selection against 50,000
 // notification parents. This is request-scope evidence, not device performance.
 func TestPrepareRoundLargeAccountRequestScope(t *testing.T) {
-	for _, selected := range []int{150, 5000, 0} {
+	for _, selected := range []int{150, 5000, 5001, 50000, 0} {
 		t.Run(fmt.Sprintf("selected_%d", selected), func(t *testing.T) {
 			verifyLargeAccountRequestScope(t, selected)
 		})

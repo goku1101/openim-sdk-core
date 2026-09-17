@@ -18,6 +18,12 @@ type SequencePage struct {
 }
 
 func (c *Client) ReadSequencePage(ctx context.Context, op string, req *pb.PullRequest, caps *pb.Capabilities, store StreamStore) (*SequencePage, error) {
+	return c.ReadSequencePageAndCommit(ctx, op, req, caps, store, nil)
+}
+
+// ReadSequencePageAndCommit retries the full read and atomic consumer commit.
+// An invalidated page is discarded; every retry re-reads authoritative bounds.
+func (c *Client) ReadSequencePageAndCommit(ctx context.Context, op string, req *pb.PullRequest, caps *pb.Capabilities, store StreamStore, commit func(*SequencePage) error) (*SequencePage, error) {
 	if req == nil || req.ConversationID == "" || req.Notifications || req.Self || store == nil {
 		return nil, fmt.Errorf("sync v2: invalid history query")
 	}
@@ -28,6 +34,9 @@ func (c *Client) ReadSequencePage(ctx context.Context, op string, req *pb.PullRe
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		page, err := c.readSequencePageAttempt(ctx, op, req, caps, store)
+		if err == nil && commit != nil {
+			err = commit(page)
+		}
 		if err == nil {
 			return page, nil
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/protocol/conversation"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 
 func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 	var hold atomic.Bool
+	var unavailable atomic.Bool
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +41,10 @@ func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if len(req.ConversationIDs) != 1 || req.ConversationIDs[0] != "si_peer_u" || !req.IncludeDetails {
 			t.Errorf("unexpected activation: %+v", req)
+		}
+		if unavailable.Load() {
+			_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{UnavailableIDs: []string{"si_peer_u"}}})
+			return
 		}
 		if hold.Load() {
 			started <- struct{}{}
@@ -140,6 +146,17 @@ func TestSyncV2ActivationPublishesOnlyRequestedConversation(t *testing.T) {
 	hidden, err := database.GetConversation(ctx, "si_peer_u")
 	if err != nil || hidden.LatestMsgSendTime != 0 || hidden.LatestMsg != "" {
 		t.Fatalf("late activation resurfaced hidden entry: %+v %v", hidden, err)
+	}
+
+	unavailable.Store(true)
+	unavailableConversation, unavailableErr := c.GetOneConversation(ctx, constant.SingleChatType, "peer")
+	var apiErr *syncv2.APIError
+	if unavailableConversation != nil || !errors.As(unavailableErr, &apiErr) || apiErr.ErrCode != 7 {
+		t.Fatalf("unavailable activation must not return a local success: %+v %v", unavailableConversation, unavailableErr)
+	}
+	preserved, err := database.GetConversation(ctx, "si_peer_u")
+	if err != nil || preserved.UserID != "peer" {
+		t.Fatalf("unavailable response removed local conversation: %+v %v", preserved, err)
 	}
 
 }

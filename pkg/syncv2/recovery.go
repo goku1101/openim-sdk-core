@@ -33,6 +33,10 @@ func RecoveryFor(err error) Recovery {
 	if errors.Is(err, ErrMetadataSnapshotRequired) {
 		return RebuildSnapshot
 	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && (httpErr.StatusCode == 429 || httpErr.StatusCode == 502 || httpErr.StatusCode == 503 || httpErr.StatusCode == 504) {
+		return Retry
+	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		if errors.Is(err, syscall.ECONNRESET) {
@@ -57,11 +61,11 @@ func RecoveryFor(err error) Recovery {
 		switch apiErr.ErrMsg {
 		case "SYNC_V2_READ_BYTES_REDUCE_BATCH", "SYNC_V2_RESPONSE_LIMIT_REDUCE_BATCH", "SYNC_V2_BATCH_LIMIT", "SYNC_V2_REQUEST_BYTES":
 			return ReduceBatch
-		case "SYNC_V2_READ_CONCURRENCY", "SYNC_V2_SNAPSHOT_QUOTA":
+		case "SYNC_V2_READ_CONCURRENCY", "SYNC_V2_SNAPSHOT_QUOTA", "SYNC_V2_READ_BUSY", "SYNC_V2_SCAN_BUSY", "SYNC_V2_BUILD_BUSY":
 			return Retry
 		}
 	case 9:
-		if apiErr.ErrMsg == "SYNC_V2_SNAPSHOT_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_POLICY_CHANGED" {
+		if apiErr.ErrMsg == "SYNC_V2_SNAPSHOT_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_POLICY_CHANGED" || apiErr.ErrMsg == "SYNC_V2_CHANGE_CURSOR_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_CHANGE_GENERATION_CHANGED" {
 			return RebuildSnapshot
 		}
 	case 10:
@@ -78,7 +82,7 @@ func RecoveryFor(err error) Recovery {
 			return Renegotiate
 		}
 	case 14:
-		if apiErr.ErrMsg == "SYNC_V2_REDIS_REQUIRED" || apiErr.ErrMsg == "SYNC_V2_REDIS_UNAVAILABLE" {
+		if apiErr.ErrMsg == "SYNC_V2_REDIS_REQUIRED" || apiErr.ErrMsg == "SYNC_V2_REDIS_UNAVAILABLE" || apiErr.ErrMsg == "SYNC_V2_ADMISSION_UNAVAILABLE" {
 			return Retry
 		}
 	}

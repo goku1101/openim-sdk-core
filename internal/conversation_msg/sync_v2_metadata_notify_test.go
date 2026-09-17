@@ -5,7 +5,6 @@ package conversation_msg
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/interaction"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
@@ -13,7 +12,6 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	conversation "github.com/openimsdk/protocol/conversation"
 	"github.com/openimsdk/protocol/sdkws"
@@ -153,18 +151,17 @@ func testMetadataBoundaryNotification(t *testing.T, pending, conflict, newlyPinn
 		}
 		return c.DoConversationChangedNotification(ctx, &sdkws.MsgData{Content: content})
 	}
+	var injected *metadataProjectionConflict
 	if conflict {
-		c.syncV2.store = &metadataProjectionConflict{conversationSyncV2Store: c.syncV2.store}
-		if err = syncMetadata(); !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
-			t.Fatalf("expected real projection CAS conflict: %v", err)
-		}
-		if len(listener.changed) != 0 {
-			t.Fatal("stale projection was published")
-		}
+		injected = &metadataProjectionConflict{conversationSyncV2Store: c.syncV2.store}
+		c.syncV2.store = injected
 	}
 
 	if err = syncMetadata(); err != nil {
 		t.Fatal(err)
+	}
+	if conflict && (!injected.injected || injected.calls < 2) {
+		t.Fatal("projection conflict was not exercised and retried")
 	}
 	row, err := database.GetConversation(ctx, "sg_target")
 	if err != nil || row.MinSeq != 7 {
@@ -245,11 +242,14 @@ func TestSyncV2MetadataRetryDoesNotReplaySuccessfulBatches(t *testing.T) {
 	c.syncV2.store = &metadataProjectionConflict{conversationSyncV2Store: c.syncV2.store, failAt: 2}
 	l := &metadataBoundaryListener{}
 	c.SetConversationListener(func() open_im_sdk_callback.OnConversationListener { return l })
-	if err = c.notifyConversationSyncV2Metadata(ctx, before, cp); !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
-		t.Fatalf("expected second-batch conflict: %v", err)
+	if err = c.notifyConversationSyncV2Metadata(ctx, before, cp); err != nil {
+		t.Fatalf("second-batch conflict was not recovered: %v", err)
 	}
-	if len(l.changed) != 1 {
-		t.Fatalf("first batch not delivered: %d", len(l.changed))
+	if wrapper := c.syncV2.store.(*metadataProjectionConflict); !wrapper.injected || wrapper.calls != 3 {
+		t.Fatalf("unexpected projection attempts: %d", wrapper.calls)
+	}
+	if len(l.changed) != 2 {
+		t.Fatalf("batches were not delivered once: %d", len(l.changed))
 	}
 	if err = c.notifyConversationSyncV2Metadata(ctx, before, cp); err != nil {
 		t.Fatal(err)

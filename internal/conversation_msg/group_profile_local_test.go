@@ -2,6 +2,7 @@ package conversation_msg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/group"
@@ -84,5 +85,54 @@ func TestGroupProfileLocalOnly(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("network called")
+	}
+}
+
+func TestGroupProfileMissingOrdinarySenderIsEnriched(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, `{"errCode":0,"data":{"members":[{"groupID":"group-a","userID":"9223372036854775807","nickname":"fetched","faceURL":"fetched.png"}]}}`)
+	}))
+	defer server.Close()
+	ctx := ccontext.WithOperationID(ccontext.WithInfo(context.Background(), &ccontext.GlobalConfig{UserID: "self", Token: "test-only", IMConfig: sdk_struct.IMConfig{ApiAddr: server.URL}}), "display")
+	c := &Conversation{group: group.NewGroup("self", &profileLocalDB{members: map[string]*model_struct.LocalGroupMember{}}, nil)}
+	for i := 0; i < 2; i++ {
+		m := &model_struct.LocalChatLog{SendID: "9223372036854775807", ContentType: 101}
+		c.groupHandle(ctx, nil, []*model_struct.LocalChatLog{m}, &model_struct.LocalConversation{GroupID: "group-a"})
+		if m.SenderNickname != "fetched" || m.SenderFaceURL != "fetched.png" {
+			t.Fatal("ordinary sender was not enriched")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("requests=%d", calls.Load())
+	}
+}
+
+func TestGroupProfileNotificationNeverFetchesAndReusesBody(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(503) }))
+	defer server.Close()
+	ctx := ccontext.WithOperationID(ccontext.WithInfo(context.Background(), &ccontext.GlobalConfig{UserID: "self", Token: "test-only", IMConfig: sdk_struct.IMConfig{ApiAddr: server.URL}}), "notification-display")
+	c := &Conversation{group: group.NewGroup("self", &profileLocalDB{members: map[string]*model_struct.LocalGroupMember{}}, nil)}
+	for _, tc := range []struct {
+		kind   int32
+		detail string
+		want   string
+	}{
+		{1510, `{"entrantUser":{"userID":"u","nickname":"entrant","faceURL":"face"}}`, "entrant"},
+		{1509, `{"opUser":{"userID":"u","nickname":"operator","faceURL":"face"}}`, "operator"},
+		{1509, `{"inviterUser":{"userID":"u","nickname":"inviter","faceURL":"face"}}`, "inviter"},
+		{1509, `{}`, ""},
+	} {
+		content, _ := json.Marshal(map[string]string{"detail": tc.detail})
+		m := &model_struct.LocalChatLog{SendID: "u", ContentType: tc.kind, Content: string(content)}
+		c.groupHandle(ctx, nil, []*model_struct.LocalChatLog{m}, &model_struct.LocalConversation{GroupID: "g"})
+		if m.SenderNickname != tc.want {
+			t.Fatalf("notification profile %q", m.SenderNickname)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("system notification caused remote display query")
 	}
 }

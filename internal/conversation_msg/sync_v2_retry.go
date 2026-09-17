@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/ccontext"
@@ -99,7 +100,7 @@ func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *mode
 	}
 	r.runMu.Lock()
 	defer r.runMu.Unlock()
-	if job.Kind != "reconcile" {
+	if job.Kind != "reconcile" && job.Kind != "state" {
 		return fmt.Errorf("sync v2: unsupported retry task")
 	}
 	var req pb.PullRequest
@@ -116,6 +117,22 @@ func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *mode
 		return syncv2.ErrStatePending
 	}
 	ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
+	if job.Kind == "state" {
+		if req.Notifications || req.Self {
+			return fmt.Errorf("sync v2: invalid metadata retry")
+		}
+		state, err := r.client.RevalidatePendingState(ctx, ccontext.Info(ctx).OperationID(), req.ConversationID, caps, r.store)
+		if err != nil {
+			return err
+		}
+		cp, err := r.store.GetConversationSyncV2(ctx)
+		if err != nil {
+			return err
+		}
+		if !state.IsPinned && state.UnreadCount == 0 && !slices.Contains(cp.SelectedIDs, req.ConversationID) {
+			return nil
+		}
+	}
 	if !req.Notifications {
 		if _, err := r.client.ActivateConversation(ctx, ccontext.Info(ctx).OperationID(), req.ConversationID, caps, r.store); err != nil {
 			return err

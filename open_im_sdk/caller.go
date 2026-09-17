@@ -225,7 +225,10 @@ func call(callback open_im_sdk_callback.Base, operationID string, fn any, args .
 			if errors.As(err, &code) {
 				callback.OnError(int32(code.Code()), code.Error())
 			} else {
-				callback.OnError(sdkerrs.UnknownCode, fmt.Sprintf("error %T not implement CodeError: %s", err, err))
+				// Internal synchronization conflicts may carry useful retry context
+				// without implementing the public CodeError interface. Do not leak the
+				// wrapper diagnostic to RN; return a stable SDK error code and message.
+				callback.OnError(sdkerrs.SdkInternalError, err.Error())
 			}
 			return
 		}
@@ -446,7 +449,7 @@ func messageCall_(callback open_im_sdk_callback.SendMsgCallBack, operationID str
 			if code, ok := last.(error).(errs.CodeError); ok {
 				callback.OnError(int32(code.Code()), code.Error())
 			} else {
-				callback.OnError(sdkerrs.UnknownCode, fmt.Sprintf("error %T not implement CodeError: %s", last.(error), last.(error).Error()))
+				callback.OnError(sdkerrs.SdkInternalError, last.(error).Error())
 			}
 			return
 		}

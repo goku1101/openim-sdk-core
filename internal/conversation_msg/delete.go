@@ -50,7 +50,10 @@ func (c *Conversation) clearConversationFromLocalAndServer(ctx context.Context, 
 
 func (c *Conversation) clearConversationAndDeleteAllMsg(ctx context.Context, conversationID string, markDelete bool, f func(ctx context.Context, conversationID string) error) error {
 	if c.syncV2 != nil && c.syncV2.mode.Load() != syncV2Legacy {
-		if err := c.syncV2.store.InvalidateConversationSyncV2Stream(ctx, conversationID); err != nil {
+		c.conversationSyncMutex.Lock()
+		err := c.syncV2.store.InvalidateConversationSyncV2Stream(ctx, conversationID)
+		c.conversationSyncMutex.Unlock()
+		if err != nil {
 			return err
 		}
 	}

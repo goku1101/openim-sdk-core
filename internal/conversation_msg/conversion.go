@@ -16,6 +16,7 @@ package conversation_msg
 
 import (
 	"context"
+	"strings"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
@@ -119,14 +120,15 @@ func LocalChatLogToMsgStruct(localMessage *model_struct.LocalChatLog) *sdk_struc
 		LocalEx:          localMessage.LocalEx,
 	}
 	var attachedInfo sdk_struct.AttachedInfoElem
-	err := utils.JsonStringToStruct(localMessage.AttachedInfo, &attachedInfo)
-	if err != nil {
-		log.ZWarn(context.Background(), "JsonStringToStruct error", err, "localMessage.AttachedInfo", localMessage.AttachedInfo)
+	if strings.TrimSpace(localMessage.AttachedInfo) != "" {
+		if err := utils.JsonStringToStruct(localMessage.AttachedInfo, &attachedInfo); err != nil {
+			log.ZWarn(context.Background(), "JsonStringToStruct error", err, "localMessage.AttachedInfo", localMessage.AttachedInfo)
+		}
 	}
 	message.AttachedInfoElem = &attachedInfo
 	errParse := msgHandleByContentType(message)
 	if errParse != nil {
-		log.ZWarn(context.Background(), "Parsing data error", err, "messageContent", message.Content)
+		log.ZWarn(context.Background(), "Parsing data error", errParse, "messageContent", message.Content)
 	}
 	switch localMessage.SessionType {
 	case constant.WriteGroupChatType:

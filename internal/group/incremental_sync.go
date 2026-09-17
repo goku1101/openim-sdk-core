@@ -2,7 +2,6 @@ package group
 
 import (
 	"context"
-	"sync"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncer"
@@ -54,7 +53,20 @@ func (g *Group) IncrSyncJoinGroupMember(ctx context.Context, groupIDs ...string)
 }
 
 func (g *Group) IncrSyncGroupAndMember(ctx context.Context, groupIDs ...string) error {
-	var wg sync.WaitGroup
+	legacy := make([]string, 0, len(groupIDs))
+	for _, id := range datautil.Distinct(groupIDs) {
+		handled, err := g.syncPartialGroup(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !handled {
+			legacy = append(legacy, id)
+		}
+	}
+	return g.syncLegacyGroupAndMember(ctx, legacy...)
+}
+
+func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string) error {
 	if len(groupIDs) == 0 {
 		return nil
 	}
@@ -99,20 +111,11 @@ func (g *Group) IncrSyncGroupAndMember(ctx context.Context, groupIDs ...string) 
 		}
 		groups = groups[:0]
 		for groupID, resp := range groupVersion {
-			tempResp := resp
-			tempGroupID := groupID
-			wg.Add(1)
-			go func() error {
-				defer wg.Done()
-				if err := g.syncGroupAndMember(ctx, tempGroupID, tempResp); err != nil {
-					log.ZError(ctx, "sync Group And Member error", errs.Wrap(err))
-					return errs.Wrap(err)
-				}
-				return nil
-			}()
-			delete(groupIDSet, tempGroupID)
+			if err := g.syncGroupAndMember(ctx, groupID, resp); err != nil {
+				return err
+			}
+			delete(groupIDSet, groupID)
 		}
-		wg.Wait()
 	}
 }
 
@@ -200,6 +203,29 @@ func (g *Group) syncGroupAndMember(ctx context.Context, groupID string, resp *gr
 
 func (g *Group) onlineSyncGroupAndMember(ctx context.Context, groupID string, deleteGroupMembers, updateGroupMembers, insertGroupMembers []*sdkws.GroupMemberFullInfo,
 	updateGroup *sdkws.GroupInfo, sortVersion uint64, version uint64, versionID string) error {
+	g.memberDirectory.mu.Lock()
+	if before, err := g.db.GetVersionSync(ctx, partialMemberTable, groupID); err == nil {
+		if before.VersionID == versionID && version <= before.Version {
+			g.memberDirectory.mu.Unlock()
+			return nil
+		}
+		if before.VersionID != versionID || version-before.Version != 1 {
+			g.memberDirectory.mu.Unlock()
+			_, err := g.syncPartialGroup(ctx, groupID)
+			return g.finishNotificationMemberSync(ctx, groupID, err)
+		}
+		change := &group.GetIncrementalGroupMemberResp{Version: version, VersionID: versionID, Insert: insertGroupMembers, Update: updateGroupMembers, Group: updateGroup}
+		for _, m := range deleteGroupMembers {
+			change.Delete = append(change.Delete, m.UserID)
+		}
+		err = g.applyPartialDeltaLocked(ctx, groupID, before, change)
+		g.memberDirectory.mu.Unlock()
+		return g.finishNotificationMemberSync(ctx, groupID, err)
+	} else if !errs.ErrRecordNotFound.Is(err) {
+		g.memberDirectory.mu.Unlock()
+		return err
+	}
+	g.memberDirectory.mu.Unlock()
 	groupMemberSyncer := syncer.VersionSynchronizer[*model_struct.LocalGroupMember, *group.GetIncrementalGroupMemberResp]{
 		Ctx:       ctx,
 		DB:        g.db,

@@ -5,6 +5,9 @@ package syncv2_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -136,5 +139,50 @@ func TestHistoryPageRetriesAfterConcurrentStreamInvalidation(t *testing.T) {
 	}
 	if stream.StateToken != "fresh" || stream.Epoch != 2 {
 		t.Fatalf("retry did not accept state on the invalidated epoch: %+v", stream)
+	}
+}
+
+func TestHistoryCommitRetriesWithFreshPermissions(t *testing.T) {
+	for _, continuous := range []bool{false, true} {
+		t.Run(fmt.Sprint(continuous), func(t *testing.T) {
+			ctx := context.Background()
+			database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close(ctx)
+			if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "c"}); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{{ConversationID: "c", Known: true, MinSeq: int64(calls), MaxSeq: 10, StateToken: fmt.Sprint(calls)}}}})
+			}))
+			defer server.Close()
+			client := syncv2.NewClient(server.URL, "", server.Client())
+			attempts := 0
+			page, err := client.ReadSequencePageAndCommit(ctx, "op", &pb.PullRequest{UserID: "u", ConversationID: "c"}, &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, database, func(page *syncv2.SequencePage) error {
+				attempts++
+				if continuous || attempts == 1 {
+					if err := database.InvalidateConversationSyncV2Stream(ctx, "c"); err != nil {
+						return err
+					}
+				}
+				return database.CommitConversationSyncV2History(ctx, page.Progress.Epoch, page.Progress, nil, page.Response.State)
+			})
+			if continuous {
+				if !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) || attempts != 3 {
+					t.Fatalf("expected bounded conflict: attempts=%d err=%v", attempts, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("commit conflict not recovered: %v", err)
+			}
+			if attempts != 2 || calls != 2 || page.Response.State.MinSeq != 2 {
+				t.Fatalf("did not re-read permissions: attempts=%d calls=%d page=%+v", attempts, calls, page)
+			}
+		})
 	}
 }

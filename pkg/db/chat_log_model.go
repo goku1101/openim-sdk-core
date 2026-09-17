@@ -265,19 +265,34 @@ func (d *DataBase) GetMessageList(ctx context.Context, conversationID string, co
 func (d *DataBase) DeleteConversationAllMessages(ctx context.Context, conversationID string) error {
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
-	return errs.WrapMsg(d.conn.WithContext(ctx).Table(utils.GetTableName(conversationID)).Where("1 = 1").Delete(model_struct.LocalChatLog{}).Error, "DeleteConversationAllMessages failed")
+	return errs.WrapMsg(d.conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table(utils.GetTableName(conversationID)).Where("1 = 1").Delete(model_struct.LocalChatLog{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("conversation_id = ?", conversationID).Delete(&model_struct.LocalSendRequest{}).Error
+	}), "DeleteConversationAllMessages failed")
 }
 
 func (d *DataBase) MarkDeleteConversationAllMessages(ctx context.Context, conversationID string) error {
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
-	return errs.WrapMsg(d.conn.WithContext(ctx).Table(utils.GetTableName(conversationID)).Where("1 = 1").Updates(model_struct.LocalChatLog{Status: constant.MsgStatusHasDeleted}).Error, "DeleteConversationAllMessages failed")
+	return errs.WrapMsg(d.conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table(utils.GetTableName(conversationID)).Where("1 = 1").Updates(model_struct.LocalChatLog{Status: constant.MsgStatusHasDeleted}).Error; err != nil {
+			return err
+		}
+		return tx.Where("conversation_id = ?", conversationID).Delete(&model_struct.LocalSendRequest{}).Error
+	}), "DeleteConversationAllMessages failed")
 }
 
 func (d *DataBase) DeleteConversationMsgs(ctx context.Context, conversationID string, msgIDs []string) error {
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
-	return errs.WrapMsg(d.conn.WithContext(ctx).Table(utils.GetTableName(conversationID)).Where("client_msg_id IN ?", msgIDs).Delete(model_struct.LocalChatLog{}).Error, "DeleteConversationMsgs failed")
+	return errs.WrapMsg(d.conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table(utils.GetTableName(conversationID)).Where("client_msg_id IN ?", msgIDs).Delete(model_struct.LocalChatLog{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("conversation_id = ? AND client_msg_id IN ?", conversationID, msgIDs).Delete(&model_struct.LocalSendRequest{}).Error
+	}), "DeleteConversationMsgs failed")
 }
 
 func (d *DataBase) DeleteConversationMsgsBySeqs(ctx context.Context, conversationID string, seqs []int64) error {

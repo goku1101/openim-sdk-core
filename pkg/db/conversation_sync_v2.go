@@ -10,6 +10,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
+	conversation "github.com/openimsdk/protocol/conversation"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -74,6 +75,10 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 		unavailable[id] = true
 	}
 	next := *checkpoint
+	next.StateEpochs = make(map[string]uint64, len(checkpoint.StateEpochs))
+	for id, epoch := range checkpoint.StateEpochs {
+		next.StateEpochs[id] = epoch
+	}
 	if !existingOnly {
 		next.Stage = "messages"
 	}
@@ -85,7 +90,7 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 	}
 	next.UnavailableIDs = append(model_struct.StringArray(nil), response.UnavailableIDs...)
 	for _, id := range checkpoint.PendingStateIDs {
-		if retained[id] && !selected[id] {
+		if !selected[id] {
 			next.PendingStateIDs = append(next.PendingStateIDs, id)
 		}
 	}
@@ -140,11 +145,34 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 				return err
 			}
 		}
-		for _, id := range refreshed {
-			// A detail response may change permissions while an older message
-			// request is in flight. Retire that request in this same transaction.
-			if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"epoch": gorm.Expr("epoch + 1"), "state_token": ""})}).Create(&model_struct.LocalConversationSyncV2Stream{ConversationID: id, Epoch: 1}).Error; err != nil {
+		existing := make(map[string]model_struct.LocalConversation, len(refreshed))
+		unchangedPermissions := make(map[string]bool, len(refreshed))
+		for start := 0; start < len(refreshed); start += 500 {
+			var conversations []model_struct.LocalConversation
+			if err := tx.Where("conversation_id IN ?", refreshed[start:min(start+500, len(refreshed))]).Find(&conversations).Error; err != nil {
 				return err
+			}
+			for _, row := range conversations {
+				existing[row.ConversationID] = row
+			}
+			var streams []model_struct.LocalConversationSyncV2Stream
+			if err := tx.Where("conversation_id IN ?", refreshed[start:min(start+500, len(refreshed))]).Find(&streams).Error; err != nil {
+				return err
+			}
+			for _, stream := range streams {
+				state := states[stream.ConversationID]
+				unchangedPermissions[stream.ConversationID] = !unavailable[stream.ConversationID] && stream.Initialized && state != nil && state.Known && state.Conversation != nil && state.StateToken != "" && state.StateToken == stream.StateToken && state.MinSeq == stream.MinSeq && state.PermissionMaxSeq == stream.PermissionMaxSeq
+			}
+		}
+		for _, id := range refreshed {
+			next.StateEpochs[id] = epochs[id]
+			// Tail/read changes do not change the V2 permission token. Retire
+			// in-flight history only for changed or unconfirmed permission bounds.
+			if !unchangedPermissions[id] {
+				next.StateEpochs[id] = epochs[id] + 1
+				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "conversation_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"epoch": gorm.Expr("epoch + 1"), "state_token": ""})}).Create(&model_struct.LocalConversationSyncV2Stream{ConversationID: id, Epoch: 1}).Error; err != nil {
+					return err
+				}
 			}
 			if unavailable[id] {
 				continue
@@ -183,13 +211,18 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 				}
 				columns["min_seq"], columns["max_seq"], columns["unread_count"] = state.MinSeq, state.MaxSeq, state.UnreadCount
 			}
+			// Compare inside the transaction, after validating permission epochs.
+			// Unchanged cache rows need neither an UPDATE nor an UPSERT.
+			if previous, ok := existing[id]; ok && conversationSyncV2DetailsEqual(previous, state) {
+				continue
+			}
 			updates := make([]string, 0, len(columns)-1)
 			for key := range columns {
 				if key != "conversation_id" {
 					updates = append(updates, key)
 				}
 			}
-			if existingOnly {
+			if existingOnly || !retained[id] {
 				if err := tx.Model(&model_struct.LocalConversation{}).Where("conversation_id = ?", id).Updates(columns).Error; err != nil {
 					return err
 				}
@@ -233,4 +266,52 @@ func (d *DataBase) SaveConversationSyncV2(ctx context.Context, checkpoint *model
 		}
 		return nil
 	})
+}
+
+func conversationSyncV2DetailsEqual(previous model_struct.LocalConversation, state *pb.State) bool {
+	detail := state.Conversation
+	return previous.ConversationType == detail.ConversationType &&
+		previous.UserID == detail.UserID && previous.GroupID == detail.GroupID &&
+		previous.RecvMsgOpt == detail.RecvMsgOpt && previous.GroupAtType == detail.GroupAtType &&
+		previous.IsPinned == state.IsPinned && previous.IsPrivateChat == detail.IsPrivateChat &&
+		previous.BurnDuration == detail.BurnDuration && previous.AttachedInfo == detail.AttachedInfo &&
+		previous.Ex == detail.Ex && previous.MsgDestructTime == detail.MsgDestructTime &&
+		previous.IsMsgDestruct == detail.IsMsgDestruct &&
+		(!state.Known || (previous.MinSeq == state.MinSeq && previous.MaxSeq == state.MaxSeq && int64(previous.UnreadCount) == state.UnreadCount))
+}
+
+// Read only the server-owned metadata cached by the last committed version.
+// Dynamic state (unread and visible bounds) is always fetched independently.
+func (d *DataBase) GetConversationSyncV2CachedDetails(ctx context.Context, ids []string) (map[string]*conversation.Conversation, error) {
+	d.mRWMutex.RLock()
+	defer d.mRWMutex.RUnlock()
+	result := make(map[string]*conversation.Conversation, len(ids))
+	var checkpoint model_struct.LocalConversationSyncV2
+	if err := d.conn.WithContext(ctx).Where("user_id = ?", d.loginUserID).Take(&checkpoint).Error; err != nil {
+		return nil, err
+	}
+	committed := make(map[string]bool, len(checkpoint.SelectedIDs))
+	for _, id := range checkpoint.SelectedIDs {
+		committed[id] = true
+	}
+	for _, id := range checkpoint.PendingStateIDs {
+		delete(committed, id)
+	}
+	for _, id := range checkpoint.UnavailableIDs {
+		delete(committed, id)
+	}
+
+	for start := 0; start < len(ids); start += 500 {
+		var rows []model_struct.LocalConversation
+		if err := d.conn.WithContext(ctx).Select("conversation_id", "conversation_type", "user_id", "group_id", "recv_msg_opt", "group_at_type", "is_private_chat", "burn_duration", "attached_info", "ex", "msg_destruct_time", "is_msg_destruct").Where("conversation_id IN ?", ids[start:min(start+500, len(ids))]).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if !committed[row.ConversationID] {
+				continue
+			}
+			result[row.ConversationID] = &conversation.Conversation{OwnerUserID: d.loginUserID, ConversationID: row.ConversationID, ConversationType: row.ConversationType, UserID: row.UserID, GroupID: row.GroupID, RecvMsgOpt: row.RecvMsgOpt, GroupAtType: row.GroupAtType, IsPrivateChat: row.IsPrivateChat, BurnDuration: row.BurnDuration, AttachedInfo: row.AttachedInfo, Ex: row.Ex, MsgDestructTime: row.MsgDestructTime, IsMsgDestruct: row.IsMsgDestruct}
+		}
+	}
+	return result, nil
 }

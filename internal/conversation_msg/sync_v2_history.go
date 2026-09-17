@@ -13,6 +13,10 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 )
 
+// This attempt-local flag distinguishes durable sequence holes from unknown
+// permissions and network errors. Only the former allow partial delivery.
+type historyUnresolvedKey struct{}
+
 func (c *Conversation) fetchConversationSyncV2History(ctx context.Context, id string, seqs []int64, isReverse bool, count int, list *[]*model_struct.LocalChatLog, callback *sdk.GetAdvancedHistoryMessageListCallback) {
 	if callback.ErrCode != 0 {
 		return
@@ -29,23 +33,22 @@ func (c *Conversation) fetchConversationSyncV2History(ctx context.Context, id st
 	if ccontext.Info(ctx).OperationID() == "" {
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
-	page, err := runtime.client.ReadSequencePage(ctx, ccontext.Info(ctx).OperationID(), &pb.PullRequest{UserID: c.loginUserID, ConversationID: id, Seqs: seqs}, caps, runtime.store)
-	if err != nil {
-		fail(err)
-		return
-	}
-	rows := make([]*model_struct.LocalChatLog, 0, len(page.Response.Messages))
-	resolved := make([]int64, 0, len(page.Response.Messages))
-	for _, message := range page.Response.Messages {
-		rows = append(rows, MsgDataToLocalChatLog(message))
-		resolved = append(resolved, message.Seq)
-	}
-	err = common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
-		return runtime.store.CommitConversationSyncV2History(ctx, page.Progress.Epoch, page.Progress, rows, page.Response.State)
+	page, err := runtime.client.ReadSequencePageAndCommit(ctx, ccontext.Info(ctx).OperationID(), &pb.PullRequest{UserID: c.loginUserID, ConversationID: id, Seqs: seqs}, caps, runtime.store, func(page *syncv2.SequencePage) error {
+		rows := make([]*model_struct.LocalChatLog, 0, len(page.Response.Messages))
+		for _, message := range page.Response.Messages {
+			rows = append(rows, MsgDataToLocalChatLog(message))
+		}
+		return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
+			return runtime.store.CommitConversationSyncV2History(ctx, page.Progress.Epoch, page.Progress, rows, page.Response.State)
+		})
 	})
 	if err != nil {
 		fail(err)
 		return
+	}
+	resolved := make([]int64, 0, len(page.Response.Messages))
+	for _, message := range page.Response.Messages {
+		resolved = append(resolved, message.Seq)
 	}
 	state := page.Response.State
 	c.maxSeqRecorder.Set(id, state.MaxSeq)
@@ -88,6 +91,9 @@ func (c *Conversation) fetchConversationSyncV2History(ctx context.Context, id st
 	})
 	*list = mergeSortedArrays(window, unique, count, !isReverse)
 	if len(page.Response.UnresolvedSeqs) > 0 {
+		if pending, ok := ctx.Value(historyUnresolvedKey{}).(*bool); ok {
+			*pending = true
+		}
 		fail(syncv2.ErrStatePending)
 	}
 }
@@ -113,11 +119,10 @@ func (c *Conversation) ensureConversationSyncV2HistoryState(ctx context.Context,
 	if ccontext.Info(ctx).OperationID() == "" {
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
-	page, err := runtime.client.ReadSequencePage(ctx, ccontext.Info(ctx).OperationID(), &pb.PullRequest{UserID: c.loginUserID, ConversationID: id}, caps, runtime.store)
-	if err != nil {
-		return err
-	}
-	return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
-		return runtime.store.CommitConversationSyncV2History(ctx, page.Progress.Epoch, page.Progress, nil, page.Response.State)
+	_, err = runtime.client.ReadSequencePageAndCommit(ctx, ccontext.Info(ctx).OperationID(), &pb.PullRequest{UserID: c.loginUserID, ConversationID: id}, caps, runtime.store, func(page *syncv2.SequencePage) error {
+		return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
+			return runtime.store.CommitConversationSyncV2History(ctx, page.Progress.Epoch, page.Progress, nil, page.Response.State)
+		})
 	})
+	return err
 }

@@ -17,6 +17,7 @@ package group
 import (
 	"context"
 	"errors"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
@@ -348,10 +349,16 @@ func (g *Group) SearchGroups(ctx context.Context, param sdk_params_callback.Sear
 }
 
 func (g *Group) GetGroupMemberOwnerAndAdmin(ctx context.Context, groupID string) ([]*model_struct.LocalGroupMember, error) {
+	if rows, handled, err := g.partialMemberPage(ctx, &pb.GroupMemberPageRequest{GroupID: groupID, Filter: 5}, 0, -1); handled || err != nil {
+		return rows, err
+	}
 	return g.db.GetGroupMemberOwnerAndAdminDB(ctx, groupID)
 }
 
 func (g *Group) GetGroupMemberListByJoinTimeFilter(ctx context.Context, groupID string, offset, count int32, joinTimeBegin, joinTimeEnd int64, userIDs []string) ([]*model_struct.LocalGroupMember, error) {
+	if rows, handled, err := g.partialMemberPage(ctx, &pb.GroupMemberPageRequest{GroupID: groupID, JoinTimeBegin: joinTimeBegin, JoinTimeEnd: joinTimeEnd, ExcludeUserIDs: append([]string(nil), userIDs...), OrderByJoinTimeDesc: true}, offset, count); handled || err != nil {
+		return rows, err
+	}
 	if joinTimeEnd == 0 {
 		joinTimeEnd = time.Now().UnixMilli()
 	}
@@ -383,6 +390,9 @@ func (g *Group) GetGroupMemberListByJoinTimeFilter(ctx context.Context, groupID 
 }
 
 func (g *Group) GetSpecifiedGroupMembersInfo(ctx context.Context, groupID string, userIDList []string) ([]*model_struct.LocalGroupMember, error) {
+	if rows, handled, err := g.partialMemberPointLookup(ctx, groupID, userIDList); handled || err != nil {
+		return rows, err
+	}
 	g.groupSyncMutex.Lock()
 	defer g.groupSyncMutex.Unlock()
 
@@ -444,6 +454,9 @@ func (g *Group) GetSpecifiedGroupMembersInfo(ctx context.Context, groupID string
 }
 
 func (g *Group) GetGroupMemberList(ctx context.Context, groupID string, filter, offset, count int32) ([]*model_struct.LocalGroupMember, error) {
+	if rows, handled, err := g.partialMemberPage(ctx, &pb.GroupMemberPageRequest{GroupID: groupID, Filter: filter}, offset, count); handled || err != nil {
+		return rows, err
+	}
 	g.groupSyncMutex.Lock()
 	defer g.groupSyncMutex.Unlock()
 
@@ -540,6 +553,9 @@ func (g *Group) GetGroupApplicationListAsApplicant(ctx context.Context, req *sdk
 }
 
 func (g *Group) SearchGroupMembers(ctx context.Context, searchParam *sdk_params_callback.SearchGroupMembersParam) ([]*model_struct.LocalGroupMember, error) {
+	if members, handled, err := g.searchPartialMembers(ctx, searchParam); handled || err != nil {
+		return members, err
+	}
 	return g.db.SearchGroupMembersDB(ctx, searchParam.KeywordList[0], searchParam.GroupID, searchParam.IsSearchMemberNickname, searchParam.IsSearchUserID, searchParam.Offset, searchParam.Count)
 }
 
@@ -558,6 +574,16 @@ func (g *Group) IsJoinGroup(ctx context.Context, groupID string) (bool, error) {
 }
 
 func (g *Group) GetUsersInGroup(ctx context.Context, groupID string, userIDList []string) ([]string, error) {
+	if rows, handled, err := g.partialMemberPointLookup(ctx, groupID, userIDList); handled || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(rows))
+		for _, m := range rows {
+			ids = append(ids, m.UserID)
+		}
+		return ids, nil
+	}
 	g.groupSyncMutex.Lock()
 	defer g.groupSyncMutex.Unlock()
 

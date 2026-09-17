@@ -1,10 +1,12 @@
 # 会话同步 V2：Core 实现记录
 
+> 当前状态（2026-09-14）：持久 changes 恢复、首次基线中断续跑、群成员部分同步和 App 缓存展示已接入本地原生分支。以下早期逐步开发记录不是当前完成度；最新构建和后端阻塞以 `vlink/app/docs/sync-v2-reference/client-contract-20260914.md` 及 `backend-error-transport-20260914.md` 为准。
+
 日期：2026-09-08。当前完成协议请求、快照准备、原生数据库检查点、详情事务落库、分批流扫描和会话队列消费确认。登录/重连协调器已接入本地源码，历史/激活/推送入口仍在开发；**App 尚未启用 V2，也未生成支持 V2 的 Android/iOS 二进制**。后续开发、编译和 App 依赖接入均在本地 worktree 完成，不推送 GitHub。
 
 ## 契约来源
 
-- 服务端：`onecode/openim-server`，固定提交 `dafe810da6405162a23066462728d4f8821db455`。
+- 服务端：`onecode/openim-server`，协议于 2026-09-14 更新至 `v2.0` 固定提交 `d9b90ebcae3576a86b0cc88931bdc8ad7a2bd766`；原始实现基线为 `dafe810da6405162a23066462728d4f8821db455`。新增扫描、变化恢复和群成员目录仅完成传输层，业务调度仍待接入。
 - 策略：`conversation-sync-v2.2`。
 - `pb/sync.proto` 和 `pb/sync.pb.go` 原样取自该提交；保留服务端原始 `go_package` 描述符，当前客户端以本模块的 `pkg/syncv2/pb` 导入生成类型。这里仅使用 HTTP，不使用服务端 gRPC stub。
 - 外部协议：`github.com/openimsdk/protocol v0.0.73-alpha.19`；Protobuf runtime `v1.36.2`。

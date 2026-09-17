@@ -7,15 +7,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 )
 
 func TestReadSnapshotSharesSnapshotAcrossScopes(t *testing.T) {
 	var scopes, cursors []string
+	var mu sync.Mutex
 	released := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		if r.URL.Path == "/conversation/sync_snapshot_release" {
 			released++
 			fmt.Fprint(w, `{"errCode":0}`)
@@ -53,7 +58,7 @@ func TestReadSnapshotSharesSnapshotAcrossScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(scopes, []string{"chat", "chat", "notifications"}) || !reflect.DeepEqual(cursors, []string{"", "c", ""}) {
+	if !(reflect.DeepEqual(scopes, []string{"chat", "chat", "notifications"}) && reflect.DeepEqual(cursors, []string{"", "c", ""})) && !(reflect.DeepEqual(scopes, []string{"chat", "notifications", "chat"}) && reflect.DeepEqual(cursors, []string{"", "", "c"})) {
 		t.Fatalf("wrong traversal: %v %v", scopes, cursors)
 	}
 	if released != 1 || !reflect.DeepEqual(result.ChatIDs, []string{"9007199254740993", "chat2"}) || !reflect.DeepEqual(result.NotificationIDs, []string{"departed"}) || !result.IncludeSelf || result.Version != 9 {
@@ -67,6 +72,12 @@ func TestReadSnapshotRejectsNonAdvancingCursorAndReleases(t *testing.T) {
 		if r.URL.Path == "/conversation/sync_snapshot_release" {
 			released++
 			fmt.Fprint(w, `{"errCode":0}`)
+			return
+		}
+		var req pb.SnapshotRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Scope == "notifications" {
+			fmt.Fprint(w, `{"errCode":0,"data":{"snapshotID":"s","policyVersion":"conversation-sync-v2.2","versionID":"v","mode":"full","scope":"notifications","includeSelf":true}}`)
 			return
 		}
 		calls++
@@ -97,5 +108,65 @@ func TestReadSnapshotReleaseFailureDoesNotRebuildCompleteSelection(t *testing.T)
 	selection, err := NewClient(server.URL, "", server.Client()).ReadSnapshot(context.Background(), "op", "u", 500)
 	if err != nil || selection == nil || selection.ReleaseError == nil || creates != 1 {
 		t.Fatalf("release failure discarded complete result: %+v %v", selection, err)
+	}
+}
+
+func TestSnapshotScopesOverlapWithoutCreatingAnotherSnapshot(t *testing.T) {
+	gate := make(chan struct{})
+	var mu sync.Mutex
+	waiting := 0
+	created := 0
+	released := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/conversation/sync_snapshot_release" {
+			mu.Lock()
+			released++
+			mu.Unlock()
+			fmt.Fprint(w, `{"errCode":0}`)
+			return
+		}
+		var req pb.SnapshotRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.SnapshotID == "" {
+			mu.Lock()
+			created++
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.SnapshotResponse{SnapshotID: "s", Scope: "chat", PolicyVersion: PolicyVersion, Mode: "full", VersionID: "v", Total: 2, HasMore: true, Cursor: "next", ConversationIDs: []string{"a"}}})
+			return
+		}
+		if req.SnapshotID != "s" {
+			t.Error("scope created another snapshot")
+		}
+		mu.Lock()
+		waiting++
+		if waiting == 2 {
+			close(gate)
+		}
+		mu.Unlock()
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
+		page := &pb.SnapshotResponse{SnapshotID: "s", Scope: req.Scope, PolicyVersion: PolicyVersion, Mode: "full", VersionID: "v"}
+		if req.Scope == "chat" {
+			page.Total = 2
+			page.ConversationIDs = []string{"b"}
+		} else {
+			page.IncludeSelf = true
+		}
+		json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": page})
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := NewClient(server.URL, "", server.Client()).ReadSnapshot(ctx, "parallel", "u", 1)
+	if err != nil || len(result.ChatIDs) != 2 {
+		t.Fatalf("scopes still serialized: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if created != 1 || released != 1 {
+		t.Fatalf("snapshot lifecycle: %d/%d", created, released)
 	}
 }

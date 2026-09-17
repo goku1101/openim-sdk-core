@@ -15,6 +15,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
+	"github.com/openimsdk/tools/log"
 )
 
 const (
@@ -24,6 +25,9 @@ const (
 )
 
 type conversationSyncV2Store interface {
+	GetSendRequest(context.Context, string, string) ([]byte, error)
+	FreezeSendRequest(context.Context, string, string, []byte) ([]byte, error)
+	DeleteSendRequest(context.Context, string, string) error
 	RefreshConversationSyncV2ReadState(context.Context, *model_struct.LocalConversationSyncV2, uint64, *pb.State) error
 	GetConversationSyncV2LocalReadMessages(context.Context, string, []int64) ([]*model_struct.LocalChatLog, error)
 	MarkConversationSyncV2LocalRead(context.Context, string, []int64) error
@@ -38,6 +42,7 @@ type conversationSyncV2Store interface {
 	FilterConversationSyncV2History(context.Context, string, []*model_struct.LocalChatLog) ([]*model_struct.LocalChatLog, error)
 	InvalidateConversationSyncV2Stream(context.Context, string) error
 	CommitConversationSyncV2History(context.Context, uint64, *model_struct.LocalConversationSyncV2Stream, []*model_struct.LocalChatLog, *pb.State) error
+	GetConversationSyncV2LatestMessages(context.Context, []*model_struct.LocalConversation) (map[string]*model_struct.LocalChatLog, error)
 	GetConversationSyncV2LatestMessage(context.Context, string, int64, int64) ([]*model_struct.LocalChatLog, error)
 	ApplyConversationSyncV2Projection(context.Context, *model_struct.LocalConversationSyncV2, map[string]uint64, []*model_struct.LocalConversation) error
 	GetConversationSyncV2Visibility(context.Context, string) (*model_struct.LocalConversationSyncV2Visibility, error)
@@ -78,7 +83,10 @@ func (c *Conversation) ConfigureConversationSyncV2(ctx context.Context) bool {
 			if runtime.mode.Load() == syncV2Legacy {
 				return nil
 			}
-			return store.InvalidateConversationSyncV2Stream(ctx, c.getConversationIDBySessionType(groupID, constant.ReadGroupChatType))
+			conversationID := c.getConversationIDBySessionType(groupID, constant.ReadGroupChatType)
+			c.conversationSyncMutex.Lock()
+			defer c.conversationSyncMutex.Unlock()
+			return store.InvalidateConversationSyncV2Stream(ctx, conversationID)
 		})
 	}
 	c.LongConnMgr.SetSyncRequestGuard(func(_ context.Context, identifier int) error {
@@ -155,6 +163,16 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			return nil
 		},
 		PrepareInitial: c.prepareConversationSyncV2InitialPage,
+		PrepareCached: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			state := c.GetConversationSyncState()
+			state.InitialDataReady = true
+			runtime.status.Store(&state)
+			c.ConversationListener().OnSyncServerProgress(state.Progress)
+			return nil
+		},
 		PrepareRelated: func(ctx context.Context) error {
 			for _, run := range []func(context.Context) error{c.group.SyncAllJoinedGroupsAndMembersWithLock, c.relation.IncrSyncFriendsWithLock, c.user.SyncLoginUserInfoWithoutNotice, c.relation.SyncAllBlackListWithoutNotice} {
 				if err := run(ctx); err != nil {
@@ -163,9 +181,10 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			}
 			return nil
 		},
-		ReadMetadata: c.getIncrementalConversationFromServer,
-		Commit:       c.ConsumeConversationSyncV2,
-		Publish:      c.publishConversationSyncV2WithProgress,
+		ReadMetadata:   c.getIncrementalConversationFromServer,
+		Commit:         c.ConsumeConversationSyncV2,
+		Publish:        c.publishConversationSyncV2WithProgress,
+		PersistPending: c.persistConversationSyncV2Pending,
 	}
 	var result *syncv2.SyncResult
 	var err error
@@ -181,7 +200,9 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		if err == nil {
 			break
 		}
+		log.ZWarn(ctx, "sync v2 synchronization failed", err, "attempt", attempt+1)
 		action := syncv2.RecoveryFor(err)
+		hooks.ForceSnapshot = action == syncv2.RebuildSnapshot
 		if attempt == 1 || ctx.Err() != nil || action != syncv2.RebuildSnapshot && action != syncv2.RefreshState && action != syncv2.Retry && action != syncv2.Renegotiate {
 			break
 		}
@@ -320,14 +341,14 @@ func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context
 			if err = c.batchAddFaceURLAndName(ctx, conversations...); err != nil {
 				return err
 			}
+			latest, err := c.syncV2.store.GetConversationSyncV2LatestMessages(ctx, conversations)
+			if err != nil {
+				return err
+			}
 			for _, conversation := range conversations {
-				messages, err := c.syncV2.store.GetConversationSyncV2LatestMessage(ctx, conversation.ConversationID, conversation.MinSeq, conversation.MaxSeq)
-				if err != nil {
-					return err
-				}
 				conversation.LatestMsg = ""
-				if len(messages) > 0 {
-					message := LocalChatLogToMsgStruct(messages[0])
+				if row := latest[conversation.ConversationID]; row != nil {
+					message := LocalChatLogToMsgStruct(row)
 					conversation.LatestMsg = utils.StructToJsonString(message)
 					conversation.LatestMsgSendTime = message.SendTime
 				}

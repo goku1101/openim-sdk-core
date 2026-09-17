@@ -234,3 +234,52 @@ func (d *DataBase) commitConversationSyncV2Messages(ctx context.Context, epoch u
 		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(next).Error
 	})
 }
+
+// Confirm cached scan completion against freshly fetched authoritative bounds.
+// The epoch comparison rejects permission invalidations since the request began.
+// Changed bounds always go through the normal scan/commit path. During warm
+// recovery an unchanged stream with historical holes is returned as false: keep
+// its durable retry task, without reserving an epoch for a scan doing no work.
+func (d *DataBase) UnchangedConversationSyncV2Streams(ctx context.Context, epochs map[string]uint64, states []*pb.State, deferHistoricalPending bool) (map[string]bool, error) {
+	d.mRWMutex.RLock()
+	defer d.mRWMutex.RUnlock()
+	unchanged := make(map[string]bool)
+	for start := 0; start < len(states); start += 500 {
+		batch := states[start:min(start+500, len(states))]
+		ids := make([]string, 0, len(batch))
+		for _, s := range batch {
+			if s != nil {
+				ids = append(ids, s.ConversationID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		var rows []model_struct.LocalConversationSyncV2Stream
+		if err := d.conn.WithContext(ctx).Where("conversation_id IN ?", ids).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		byID := make(map[string]*model_struct.LocalConversationSyncV2Stream, len(rows))
+		for i := range rows {
+			byID[rows[i].ConversationID] = &rows[i]
+		}
+		for _, state := range batch {
+			if state == nil || !state.Known || state.StateToken == "" || state.MinSeq < 0 || state.MaxSeq < 0 || state.PermissionMaxSeq < 0 {
+				continue
+			}
+			row := byID[state.ConversationID]
+			epoch, ok := epochs[state.ConversationID]
+			if !ok || row == nil || !row.Initialized || row.Epoch != epoch || row.StateToken != state.StateToken || row.MinSeq != state.MinSeq || row.PermissionMaxSeq != state.PermissionMaxSeq || (len(row.PendingSeqs) != 0 && !deferHistoricalPending) {
+				continue
+			}
+			upper := state.MaxSeq
+			if state.PermissionMaxSeq > 0 {
+				upper = min(upper, state.PermissionMaxSeq)
+			}
+			if row.ScannedSeq >= upper {
+				unchanged[state.ConversationID] = len(row.PendingSeqs) == 0
+			}
+		}
+	}
+	return unchanged, nil
+}

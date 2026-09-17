@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,9 +31,9 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	sdk "github.com/openimsdk/openim-sdk-core/v3/pkg/sdk_params_callback"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
-
 	"github.com/openimsdk/tools/log"
 
 	"github.com/openimsdk/protocol/sdkws"
@@ -53,6 +54,30 @@ func (c *Conversation) setConversation(ctx context.Context, apiReq *pbConversati
 }
 
 func (c *Conversation) getAdvancedHistoryMessageList(ctx context.Context, req sdk.GetAdvancedHistoryMessageListParams, isReverse bool) (*sdk.GetAdvancedHistoryMessageListCallback, error) {
+	// Permission events can invalidate state after the initial check, during the
+	// cached query or before delivery. Restart the page so fresh bounds apply
+	// before LIMIT; never return the rejected rows after simply refreshing state.
+	for attempt := 0; ; attempt++ {
+		result, err := c.getAdvancedHistoryMessageListAttempt(ctx, req, isReverse)
+		stateChanged := err != nil && (errors.Is(err, sdkerrs.ErrSyncV2StateChanged) || strings.Contains(err.Error(), "sync v2: local state changed"))
+		if err == nil || c.syncV2 == nil || c.syncV2.mode.Load() == syncV2Legacy || !stateChanged || attempt == 7 {
+			return result, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		log.ZWarn(ctx, "sync v2 history state changed; retrying", err, "conversationID", req.ConversationID, "attempt", attempt+1)
+		// Conversation notifications can legitimately advance the stream while
+		// a page is being assembled. Give the event queue a brief chance to
+		// settle before retrying instead of surfacing a transient state error to
+		// the chat screen.
+		time.Sleep(time.Duration(25*(attempt+1)) * time.Millisecond)
+	}
+}
+
+func (c *Conversation) getAdvancedHistoryMessageListAttempt(ctx context.Context, req sdk.GetAdvancedHistoryMessageListParams, isReverse bool) (*sdk.GetAdvancedHistoryMessageListCallback, error) {
+	var unresolved bool
+	ctx = context.WithValue(ctx, historyUnresolvedKey{}, &unresolved)
 	t := time.Now()
 	var messageListCallback sdk.GetAdvancedHistoryMessageListCallback
 	var conversationID string
@@ -107,6 +132,13 @@ func (c *Conversation) getAdvancedHistoryMessageList(ctx context.Context, req sd
 	}
 	log.ZDebug(ctx, "sort", "sort cost time", time.Since(t))
 	messageListCallback.MessageList = messageList
+	// A known, authorized page may contain only durable holes. Return it without
+	// a permission-state error, but never claim that history has ended.
+	if unresolved && messageListCallback.ErrMsg == syncv2.ErrStatePending.Error() {
+		messageListCallback.ErrCode = 0
+		messageListCallback.ErrMsg = ""
+		messageListCallback.IsEnd = false
+	}
 
 	return &messageListCallback, nil
 }

@@ -12,14 +12,22 @@ import (
 // independent HTTP batches. A failed wave is cancelled and never reaches the
 // database. Merge and progress publication remain ordered on the caller.
 func (c *Client) metadataStatesBatched(ctx context.Context, op, userID string, ids []string, caps *pb.Capabilities) (*pb.StateResponse, error) {
+	return c.metadataStatesWithDetails(ctx, op, userID, ids, caps, true)
+}
+
+func (c *Client) metadataStatesWithDetails(ctx context.Context, op, userID string, ids []string, caps *pb.Capabilities, details bool) (*pb.StateResponse, error) {
 	if caps == nil || caps.MaxBatchSize <= 0 || caps.MaxRequestBytes <= 0 {
 		return nil, fmt.Errorf("sync v2: missing request limits")
 	}
 	batchSize := min(int(caps.MaxBatchSize), 500)
+	concurrency := 2
+	if !details {
+		concurrency = 4
+	}
 	out := new(pb.StateResponse)
 	progress, _ := ctx.Value(stateProgressKey{}).(func(int, int))
-	for start := 0; start < len(ids); start += 2 * batchSize {
-		end := min(start+2*batchSize, len(ids))
+	for start := 0; start < len(ids); start += concurrency * batchSize {
+		end := min(start+concurrency*batchSize, len(ids))
 		batches := (end - start + batchSize - 1) / batchSize
 		results := make([]*pb.StateResponse, batches)
 		group, waveCtx := errgroup.WithContext(ctx)
@@ -31,7 +39,7 @@ func (c *Client) metadataStatesBatched(ctx context.Context, op, userID string, i
 			batchStart := start + index*batchSize
 			selected := ids[batchStart:min(batchStart+batchSize, end)]
 			group.Go(func() error {
-				result, err := c.StatesBatched(waveCtx, op, &pb.StateRequest{UserID: userID, ConversationIDs: selected, IncludeDetails: true}, caps)
+				result, err := c.StatesBatched(waveCtx, op, &pb.StateRequest{UserID: userID, ConversationIDs: selected, IncludeDetails: details}, caps)
 				if err != nil {
 					return err
 				}

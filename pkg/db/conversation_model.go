@@ -417,6 +417,7 @@ func (d *DataBase) DecrConversationUnreadCount(ctx context.Context, conversation
 	d.mRWMutex.Lock()
 	defer d.mRWMutex.Unlock()
 	tx := d.conn.WithContext(ctx).Begin()
+	defer tx.Rollback()
 	c := model_struct.LocalConversation{ConversationID: conversationID}
 	t := tx.Model(&c).Update("unread_count", gorm.Expr("unread_count-?", count))
 	if t.Error != nil {

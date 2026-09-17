@@ -174,13 +174,13 @@ func (c *Conversation) revokeOneMessage(ctx context.Context, conversationID, cli
 		}
 	case constant.ReadGroupChatType:
 		if message.SendID != c.loginUserID {
-			groupAdmins, err := c.db.GetGroupMemberOwnerAndAdminDB(ctx, conversation.GroupID)
+			groupAdmins, err := c.group.GetSpecifiedGroupMembersInfo(ctx, conversation.GroupID, []string{c.loginUserID})
 			if err != nil {
 				return err
 			}
 			var isAdmin bool
 			for _, member := range groupAdmins {
-				if member.UserID == c.loginUserID {
+				if member.UserID == c.loginUserID && (member.RoleLevel == 100 || member.RoleLevel == 60) {
 					isAdmin = true
 					break
 				}

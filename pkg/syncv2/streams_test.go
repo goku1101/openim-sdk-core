@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -41,14 +42,14 @@ func (s *batchStreamMemory) AcceptConversationSyncV2State(_ context.Context, epo
 
 func TestSyncStreamsBatchesFiftyThousandNotifications(t *testing.T) {
 	store := &batchStreamMemory{epochs: map[string]uint64{}}
-	requests := 0
+	requests := int64(0)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/msg/sync_seqs_v2" {
 			t.Errorf("empty streams must not pull: %s", r.URL.Path)
 			w.WriteHeader(500)
 			return
 		}
-		requests++
+		atomic.AddInt64(&requests, 1)
 		var req pb.StateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)

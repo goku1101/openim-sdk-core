@@ -20,14 +20,22 @@ func (g *Group) GetGroupMembersInfoFunc(ctx context.Context, groupID string, use
 		res         = make(map[string]*model_struct.LocalGroupMember)
 		missingKeys []string
 	)
+	seen := make(map[string]struct{}, len(userIDs))
 
 	for _, userID := range userIDs {
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
 		key := g.buildGroupMemberKey(groupID, userID)
 		if member, ok := g.groupMemberCache.Load(key); ok {
 			res[userID] = member
 		} else {
-			missingKeys = append(missingKeys, userIDs...)
+			missingKeys = append(missingKeys, userID)
 		}
+	}
+	if len(missingKeys) == 0 {
+		return res, nil
 	}
 
 	log.ZDebug(ctx, "GetGroupMembersInfoFunc fetch", "missingKeys", missingKeys)
@@ -46,6 +54,16 @@ func (g *Group) GetGroupMembersInfoFunc(ctx context.Context, groupID string, use
 }
 
 func (g *Group) GetGroupMembersInfo(ctx context.Context, groupID string, userIDs []string) (map[string]*model_struct.LocalGroupMember, error) {
+	if rows, handled, err := g.partialMemberPointLookup(ctx, groupID, userIDs); handled || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]*model_struct.LocalGroupMember{}
+		for _, m := range rows {
+			out[m.UserID] = m
+		}
+		return out, nil
+	}
 	res := make(map[string]*model_struct.LocalGroupMember)
 	if len(userIDs) == 0 {
 		return res, nil

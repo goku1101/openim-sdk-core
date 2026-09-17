@@ -2,6 +2,8 @@ package group
 
 import (
 	"context"
+	"encoding/json"
+	"sort"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/api"
 	"github.com/openimsdk/protocol/group"
@@ -74,8 +76,46 @@ func (g *Group) cancelMuteGroup(ctx context.Context, groupID string) error {
 }
 
 func (g *Group) getDesignatedGroupMembers(ctx context.Context, groupID string, userIDs []string) ([]*sdkws.GroupMemberFullInfo, error) {
-	req := &group.GetGroupMembersInfoReq{GroupID: groupID, UserIDs: userIDs}
-	return api.ExtractField(ctx, api.GetGroupMembersInfo.Invoke, req, (*group.GetGroupMembersInfoResp).GetMembers)
+	if len(userIDs) == 0 {
+		return []*sdkws.GroupMemberFullInfo{}, nil
+	}
+	ids := append([]string(nil), userIDs...)
+	sort.Strings(ids)
+	unique := ids[:0]
+	for _, id := range ids {
+		if len(unique) == 0 || unique[len(unique)-1] != id {
+			unique = append(unique, id)
+		}
+	}
+	key, _ := json.Marshal([]any{groupID, unique})
+	g.memberLookupOnce.Do(func() { g.memberLookupSlot = make(chan struct{}, 1) })
+	ch := g.memberLookup.DoChan(string(key), func() (any, error) {
+		select {
+		case g.memberLookupSlot <- struct{}{}:
+			defer func() { <-g.memberLookupSlot }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		result := []*sdkws.GroupMemberFullInfo{}
+		for start := 0; start < len(unique); start += 100 {
+			req := &group.GetGroupMembersInfoReq{GroupID: groupID, UserIDs: unique[start:min(start+100, len(unique))]}
+			members, err := api.ExtractField(ctx, api.GetGroupMembersInfo.Invoke, req, (*group.GetGroupMembersInfoResp).GetMembers)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, members...)
+		}
+		return result, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.([]*sdkws.GroupMemberFullInfo), nil
+	}
 }
 
 func (g *Group) getServerSelfGroupApplication(ctx context.Context, groupIDs []string,

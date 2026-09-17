@@ -14,6 +14,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	sdk "github.com/openimsdk/openim-sdk-core/v3/pkg/sdk_params_callback"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"net/http"
@@ -83,6 +84,30 @@ func TestSyncV2CachedHistoryRefreshesInvalidatedPermissionBeforeLimit(t *testing
 	if _, err = database.GetMessageBySeq(ctx, "c", 12); err != nil {
 		t.Fatal("permission filtering deleted stored history")
 	}
+
+	for _, stage := range []string{"read", "delivery"} {
+		for _, reverse := range []bool{false, true} {
+			wrapper := &invalidatingHistoryStore{conversationSyncV2Store: database, stage: stage, remaining: 1}
+			c.syncV2.store = wrapper
+			beforeReads := reads.Load()
+			page, retryErr := c.getAdvancedHistoryMessageList(ctx, sdk.GetAdvancedHistoryMessageListParams{ConversationID: "c", Count: 2}, reverse)
+			if retryErr != nil || page == nil || len(page.MessageList) != 2 || wrapper.checks != 2 || reads.Load() != beforeReads+1 {
+				t.Fatalf("%s reverse=%v invalidation not recovered: page=%+v err=%v checks=%d", stage, reverse, page, retryErr, wrapper.checks)
+			}
+			for _, row := range page.MessageList {
+				if row.Seq != 0 && (row.Seq < 5 || row.Seq > 8) {
+					t.Fatal("retry exposed revoked history")
+				}
+			}
+		}
+	}
+	wrapper := &invalidatingHistoryStore{conversationSyncV2Store: database, stage: "delivery", remaining: 10}
+	c.syncV2.store = wrapper
+	exhausted, retryErr := c.getAdvancedHistoryMessageList(ctx, sdk.GetAdvancedHistoryMessageListParams{ConversationID: "c", Count: 2}, false)
+	if exhausted != nil || !errors.Is(retryErr, sdkerrs.ErrSyncV2StateChanged) || wrapper.checks != 8 {
+		t.Fatalf("continuous invalidation was not bounded: page=%+v err=%v checks=%d", exhausted, retryErr, wrapper.checks)
+	}
+	c.syncV2.store = database
 	unknown.Store(true)
 	if err = database.InvalidateConversationSyncV2Stream(ctx, "c"); err != nil {
 		t.Fatal(err)
@@ -94,4 +119,37 @@ func TestSyncV2CachedHistoryRefreshesInvalidatedPermissionBeforeLimit(t *testing
 	if _, err = database.FilterConversationSyncV2History(ctx, "c", rows); err == nil {
 		t.Fatal("final delivery check accepted invalidated cache")
 	}
+}
+
+// Invalidate after the initial permission check, at either the cached read or
+// the final delivery check. The returned page must come from a fresh attempt.
+type invalidatingHistoryStore struct {
+	conversationSyncV2Store
+	stage     string
+	remaining int
+	checks    int
+}
+
+func (s *invalidatingHistoryStore) invalidate(ctx context.Context, id, stage string) error {
+	if s.stage != stage {
+		return nil
+	}
+	s.checks++
+	if s.remaining == 0 {
+		return nil
+	}
+	s.remaining--
+	return s.InvalidateConversationSyncV2Stream(ctx, id)
+}
+func (s *invalidatingHistoryStore) GetConversationSyncV2HistoryPage(ctx context.Context, id string, count int, startTime, startSeq int64, startID string, reverse bool) ([]*model_struct.LocalChatLog, error) {
+	if err := s.invalidate(ctx, id, "read"); err != nil {
+		return nil, err
+	}
+	return s.conversationSyncV2Store.GetConversationSyncV2HistoryPage(ctx, id, count, startTime, startSeq, startID, reverse)
+}
+func (s *invalidatingHistoryStore) FilterConversationSyncV2History(ctx context.Context, id string, rows []*model_struct.LocalChatLog) ([]*model_struct.LocalChatLog, error) {
+	if err := s.invalidate(ctx, id, "delivery"); err != nil {
+		return nil, err
+	}
+	return s.conversationSyncV2Store.FilterConversationSyncV2History(ctx, id, rows)
 }

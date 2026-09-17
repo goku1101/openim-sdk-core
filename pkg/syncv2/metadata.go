@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	conversation "github.com/openimsdk/protocol/conversation"
 )
@@ -135,18 +136,75 @@ func (c *Client) applyMetadataDelta(ctx context.Context, op string, before *mode
 	if err != nil {
 		return nil, err
 	}
-	states, err := c.metadataStatesBatched(ctx, op, before.UserID, refreshed, caps)
+	states, err := c.metadataStatesForDelta(ctx, op, before.UserID, refreshed, delta, caps, store)
 	if err != nil {
 		return nil, err
 	}
-	if affectedIDs == nil {
-		err = store.ApplyConversationSyncV2Metadata(ctx, before, plan.Next, states, plan.DeletedIDs)
-	} else {
-		err = store.(MetadataSubsetStore).ApplyConversationSyncV2MetadataSubset(ctx, before, plan.Next, states, plan.DeletedIDs, refreshed)
+	for attempt := 0; ; attempt++ {
+		if affectedIDs == nil {
+			err = store.ApplyConversationSyncV2Metadata(ctx, before, plan.Next, states, plan.DeletedIDs)
+		} else {
+			err = store.(MetadataSubsetStore).ApplyConversationSyncV2MetadataSubset(ctx, before, plan.Next, states, plan.DeletedIDs, refreshed)
+		}
+		if err == nil {
+			break
+		}
+		if attempt >= 2 || !errors.Is(err, sdkerrs.ErrSyncV2StateChanged) {
+			return nil, err
+		}
+		current, readErr := store.GetConversationSyncV2(ctx)
+		if readErr != nil {
+			return nil, readErr
+		}
+		// A changed checkpoint needs a new metadata delta, not a replay of this one.
+		if current.Revision != before.Revision || current.Generation != before.Generation {
+			return nil, err
+		}
+		epochs, readErr := store.GetConversationSyncV2Epochs(ctx, append(append([]string(nil), refreshed...), plan.DeletedIDs...))
+		if readErr != nil {
+			return nil, readErr
+		}
+		for _, id := range plan.DeletedIDs {
+			if epochs[id] != plan.Next.StateEpochs[id] {
+				return nil, err
+			}
+		}
+		changed := make(map[string]bool)
+		var ids []string
+		for _, id := range refreshed {
+			if epochs[id] != plan.Next.StateEpochs[id] {
+				changed[id] = true
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			return nil, err
+		}
+		fresh, readErr := c.metadataStatesBatched(ctx, op, before.UserID, ids, caps)
+		if readErr != nil {
+			return nil, readErr
+		}
+		// Retain unaffected results. The transaction rechecks captured epochs,
+		// so a further notification can never make stale permissions commit.
+		nextStates := &pb.StateResponse{}
+		for _, state := range states.States {
+			if !changed[state.ConversationID] {
+				nextStates.States = append(nextStates.States, state)
+			}
+		}
+		for _, id := range states.UnavailableIDs {
+			if !changed[id] {
+				nextStates.UnavailableIDs = append(nextStates.UnavailableIDs, id)
+			}
+		}
+		nextStates.States = append(nextStates.States, fresh.States...)
+		nextStates.UnavailableIDs = append(nextStates.UnavailableIDs, fresh.UnavailableIDs...)
+		states = nextStates
+		for _, id := range ids {
+			plan.Next.StateEpochs[id] = epochs[id]
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
+
 	current, err := store.GetConversationSyncV2(ctx)
 	if err != nil {
 		return nil, err
@@ -154,5 +212,62 @@ func (c *Client) applyMetadataDelta(ctx context.Context, op string, before *mode
 	if current.Revision != before.Revision+1 || current.Generation != before.Generation || current.VersionID != plan.Next.VersionID || current.Version != plan.Next.Version {
 		return nil, fmt.Errorf("sync v2: metadata round superseded")
 	}
+	if prepared, ok := ctx.Value(preparedChatStatesKey{}).(*preparedChatStates); ok {
+		prepared.states = make(map[string]*pb.State, len(states.States))
+		for _, state := range states.States {
+			prepared.states[state.ConversationID] = state
+		}
+		prepared.unavailable = make(map[string]bool, len(states.UnavailableIDs))
+		for _, id := range states.UnavailableIDs {
+			prepared.unavailable[id] = true
+		}
+		prepared.epochs = current.StateEpochs
+	}
 	return current, nil
+}
+
+// During recovery the metadata version identifies changed details. Fresh state
+// remains mandatory for tails, reads and permissions, which have separate clocks.
+type cachedMetadataStore interface {
+	GetConversationSyncV2CachedDetails(context.Context, []string) (map[string]*conversation.Conversation, error)
+}
+
+func (c *Client) metadataStatesForDelta(ctx context.Context, op, userID string, ids []string, delta *conversation.GetIncrementalConversationResp, caps *pb.Capabilities, store MetadataStore) (*pb.StateResponse, error) {
+	cachedStore, ok := store.(cachedMetadataStore)
+	if _, warm := ctx.Value(preparedChatStatesKey{}).(*preparedChatStates); !warm || !ok {
+		return c.metadataStatesBatched(ctx, op, userID, ids, caps)
+	}
+	cached, err := cachedStore.GetConversationSyncV2CachedDetails(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	changed := make(map[string]bool)
+	for _, row := range delta.Update {
+		changed[row.ConversationID] = true
+	}
+	for _, row := range delta.Insert {
+		changed[row.ConversationID] = true
+	}
+	var details, statesOnly []string
+	for _, id := range ids {
+		if changed[id] || cached[id] == nil {
+			details = append(details, id)
+		} else {
+			statesOnly = append(statesOnly, id)
+		}
+	}
+	result, err := c.metadataStatesWithDetails(ctx, op, userID, statesOnly, caps, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, state := range result.States {
+		state.Conversation = cached[state.ConversationID]
+	}
+	fresh, err := c.metadataStatesBatched(ctx, op, userID, details, caps)
+	if err != nil {
+		return nil, err
+	}
+	result.States = append(result.States, fresh.States...)
+	result.UnavailableIDs = append(result.UnavailableIDs, fresh.UnavailableIDs...)
+	return result, nil
 }

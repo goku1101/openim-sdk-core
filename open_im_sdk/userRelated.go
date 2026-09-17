@@ -101,7 +101,7 @@ type LoginMgr struct {
 	third        *third.Third
 	token        string
 	loginUserID  string
-	connListener open_im_sdk_callback.OnConnListener
+	connListener *connectionListenerProxy
 
 	justOnceFlag bool
 
@@ -411,7 +411,7 @@ func (u *LoginMgr) InitSDK(config sdk_struct.IMConfig, listener open_im_sdk_call
 	}
 	u.info = &ccontext.GlobalConfig{}
 	u.info.IMConfig = config
-	u.connListener = listener
+	u.connListener = &connectionListenerProxy{listener: listener}
 	u.initResources()
 	return true
 }

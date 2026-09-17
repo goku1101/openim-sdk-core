@@ -35,6 +35,8 @@ func TestNotificationMemberPermissionAfterLeaving(t *testing.T) {
 				memberCalls, joinCalls := 0, 0
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch r.URL.Path {
+					case "/group/sync_capabilities":
+						w.WriteHeader(404)
 					case "/group/get_incremental_group_members_batch":
 						memberCalls++
 						code := 1002

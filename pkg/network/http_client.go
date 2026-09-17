@@ -109,6 +109,12 @@ func ApiPost(ctx context.Context, api string, req, resp any) (err error) {
 
 	// Ensure the response body is closed after processing.
 	defer response.Body.Close()
+	// Admission metadata must survive API decoding so optional callers can defer
+	// further requests without losing the server's business error code/message.
+	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusServiceUnavailable {
+		defer func() { err = withRetryAfter(err, response, time.Now()) }()
+	}
+
 	var body io.ReadCloser
 	switch contentEncoding := response.Header.Get("Content-Encoding"); contentEncoding {
 	case "":

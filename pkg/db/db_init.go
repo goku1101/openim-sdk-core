@@ -146,8 +146,8 @@ func (d *DataBase) initDB(ctx context.Context, logLevel int) error {
 	}
 
 	sqlDB.SetConnMaxLifetime(time.Hour * 1)
-	sqlDB.SetMaxOpenConns(5)
-	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
 	sqlDB.SetConnMaxIdleTime(time.Minute * 10)
 	d.conn = db
 
@@ -161,7 +161,7 @@ func (d *DataBase) initDB(ctx context.Context, logLevel int) error {
 	}
 	// The fork can introduce V2 while retaining the upstream SDK version string.
 	// Migrate this independent table for both fresh and existing installations.
-	if err = db.AutoMigrate(&model_struct.LocalConversationSyncV2{}, &model_struct.LocalConversationSyncV2Stream{}, &model_struct.LocalConversationSyncV2Retry{}, &model_struct.LocalConversationSyncV2Visibility{}); err != nil {
+	if err = db.AutoMigrate(&model_struct.LocalSendRequest{}, &model_struct.LocalConversationSyncV2{}, &model_struct.LocalConversationSyncV2Stream{}, &model_struct.LocalConversationSyncV2Retry{}, &model_struct.LocalConversationSyncV2Visibility{}); err != nil {
 		return err
 	}
 
@@ -173,7 +173,7 @@ func (d *DataBase) initDB(ctx context.Context, logLevel int) error {
 }
 
 func (d *DataBase) versionDataMigrate(ctx context.Context) error {
-	verModel, err := d.GetAppSDKVersion(ctx)
+	verModel, err := d.getAppSDKVersion(ctx)
 	if errs.Unwrap(err) == errs.ErrRecordNotFound {
 		err = d.conn.AutoMigrate(
 			&model_struct.LocalAppSDKVersion{},
@@ -195,7 +195,7 @@ func (d *DataBase) versionDataMigrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		err = d.SetAppSDKVersion(ctx, &model_struct.LocalAppSDKVersion{Version: version.Version})
+		err = d.setAppSDKVersion(ctx, &model_struct.LocalAppSDKVersion{Version: version.Version})
 		if err != nil {
 			return err
 		}
@@ -209,7 +209,7 @@ func (d *DataBase) versionDataMigrate(ctx context.Context) error {
 		case "3.8.0":
 			d.conn.AutoMigrate(&model_struct.LocalAppSDKVersion{})
 		}
-		err = d.SetAppSDKVersion(ctx, &model_struct.LocalAppSDKVersion{Version: version.Version})
+		err = d.setAppSDKVersion(ctx, &model_struct.LocalAppSDKVersion{Version: version.Version})
 		if err != nil {
 			return err
 		}

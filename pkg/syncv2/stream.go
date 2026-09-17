@@ -12,6 +12,8 @@ import (
 	"github.com/openimsdk/protocol/sdkws"
 )
 
+type deferHistoricalChatHolesKey struct{}
+
 var ErrStatePending = errors.New("sync v2: stream state remains unconfirmed")
 
 type StreamStore interface {
@@ -42,8 +44,9 @@ func pullStreamID(req *pb.PullRequest) (string, error) {
 }
 
 // SyncStream reads current permissions before pulling a bounded page at a time.
-// Each pre-existing hole is retried once per call. Newly discovered holes remain
-// durable for a later round instead of spinning or becoming deletion placeholders.
+// Existing holes are retried once per call, except chat holes deferred by warm
+// startup to its durable retry queue. Newly discovered holes remain durable for
+// a later round instead of spinning or becoming deletion placeholders.
 func (c *Client) SyncStream(ctx context.Context, op string, req *pb.PullRequest, caps *pb.Capabilities, store StreamStore, commit CommitStream) (*model_struct.LocalConversationSyncV2Stream, error) {
 	id, err := pullStreamID(req)
 	if err != nil {
@@ -162,7 +165,7 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 	}
 	var pending []int64
 	for _, seq := range stream.PendingSeqs {
-		if seq >= lower && seq <= upper {
+		if seq >= lower && seq <= upper && (req.Notifications || ctx.Value(deferHistoricalChatHolesKey{}) != true) {
 			pending = append(pending, seq)
 		}
 	}

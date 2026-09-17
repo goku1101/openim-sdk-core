@@ -43,7 +43,10 @@ const (
 
 func InitSDK(listener open_im_sdk_callback.OnConnListener, operationID string, config string) bool {
 	if UserForSDK != nil {
-		fmt.Println(operationID, "Initialize multiple times, use the existing ", UserForSDK, " Previous configuration ", UserForSDK.ImConfig(), " now configuration: ", config)
+		if listener == nil {
+			return false
+		}
+		UserForSDK.connListener.replace(listener)
 		return true
 	}
 	var configArgs sdk_struct.IMConfig

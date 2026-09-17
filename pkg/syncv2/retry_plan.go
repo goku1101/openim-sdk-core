@@ -36,6 +36,21 @@ func PendingRetryTasks(result *SyncResult, dueAt int64) ([]*model_struct.LocalCo
 		requests[id] = req
 	}
 	var jobs []*model_struct.LocalConversationSyncV2Retry
+	metadataSeen := make(map[string]bool)
+	for _, id := range cp.PendingStateIDs {
+		if id == "" {
+			return nil, fmt.Errorf("sync v2: empty pending state ID")
+		}
+		if metadataSeen[id] {
+			continue
+		}
+		metadataSeen[id] = true
+		payload, err := json.Marshal(&pb.PullRequest{UserID: cp.UserID, ConversationID: id})
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, &model_struct.LocalConversationSyncV2Retry{TaskID: "state:" + id, Kind: "state", Payload: string(payload), DueAt: dueAt})
+	}
 	seen := make(map[string]bool)
 	for _, streams := range []*StreamResults{result.Notifications, result.Chats} {
 		if streams == nil {

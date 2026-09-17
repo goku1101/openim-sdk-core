@@ -62,6 +62,8 @@ func (c *Conversation) refreshConversationSyncV2ReadState(ctx context.Context, i
 		if len(response.UnavailableIDs) != 1 || response.UnavailableIDs[0] != id || len(response.States) != 0 {
 			return fmt.Errorf("sync v2: invalid unavailable read state")
 		}
+		c.conversationSyncMutex.Lock()
+		defer c.conversationSyncMutex.Unlock()
 		return runtime.store.InvalidateConversationSyncV2Stream(ctx, id)
 	}
 	if len(response.States) == 0 {

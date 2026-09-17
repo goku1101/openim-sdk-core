@@ -4,20 +4,26 @@ package model_struct
 // does not replace legacy UIDList or authorize deletion of local conversations.
 // Incomplete snapshots are rebuilt; detail/message stages can replay idempotently.
 type LocalConversationSyncV2 struct {
-	UserID          string            `gorm:"column:user_id;primaryKey"`
-	PolicyVersion   string            `gorm:"column:policy_version"`
-	Stage           string            `gorm:"column:stage"`
-	SnapshotID      string            `gorm:"column:snapshot_id"`
-	Generation      string            `gorm:"column:generation"`
-	Revision        uint64            `gorm:"column:revision"`
-	SelectedIDs     StringArray       `gorm:"column:selected_ids;type:text"`
-	NotificationIDs StringArray       `gorm:"column:notification_ids;type:text"`
-	IncludeSelf     bool              `gorm:"column:include_self"`
-	VersionID       string            `gorm:"column:version_id"`
-	Version         uint64            `gorm:"column:version"`
-	PendingStateIDs StringArray       `gorm:"column:pending_state_ids;type:text"`
-	UnavailableIDs  StringArray       `gorm:"column:unavailable_ids;type:text"`
-	StateEpochs     map[string]uint64 `gorm:"column:state_epochs;serializer:json"`
+	// Recovery tokens are opaque and belong to this account and server domain.
+	ChangeCursor          string            `gorm:"column:change_cursor"`
+	ChangeUntilCursor     string            `gorm:"column:change_until_cursor"`
+	SyncDomainID          string            `gorm:"column:sync_domain_id"`
+	RecoveryVersion       string            `gorm:"column:recovery_version"`
+	RecoveryBaselineReady bool              `gorm:"column:recovery_baseline_ready"`
+	UserID                string            `gorm:"column:user_id;primaryKey"`
+	PolicyVersion         string            `gorm:"column:policy_version"`
+	Stage                 string            `gorm:"column:stage"`
+	SnapshotID            string            `gorm:"column:snapshot_id"`
+	Generation            string            `gorm:"column:generation"`
+	Revision              uint64            `gorm:"column:revision"`
+	SelectedIDs           StringArray       `gorm:"column:selected_ids;type:text"`
+	NotificationIDs       StringArray       `gorm:"column:notification_ids;type:text"`
+	IncludeSelf           bool              `gorm:"column:include_self"`
+	VersionID             string            `gorm:"column:version_id"`
+	Version               uint64            `gorm:"column:version"`
+	PendingStateIDs       StringArray       `gorm:"column:pending_state_ids;type:text"`
+	UnavailableIDs        StringArray       `gorm:"column:unavailable_ids;type:text"`
+	StateEpochs           map[string]uint64 `gorm:"column:state_epochs;serializer:json"`
 }
 
 func (LocalConversationSyncV2) TableName() string { return "local_conversation_sync_v2" }

@@ -6,9 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/openimsdk/tools/log"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
@@ -19,6 +22,8 @@ import (
 
 const PolicyVersion = "conversation-sync-v2.2"
 const maxRequestBytes = 64 * 1024
+
+var diagnosticReason = regexp.MustCompile(`SYNC_V2_[A-Z_]+`)
 
 // The server bounds protobuf responses to 3 MiB. JSON escaping can expand strings
 // sixfold; bound the wire response as well, including its API envelope.
@@ -38,24 +43,55 @@ func (e *APIError) Error() string { return fmt.Sprintf("sync v2: %d %s", e.ErrCo
 // The outer APIError remains available for Sync V2 recovery decisions.
 func (e *APIError) Unwrap() error { return errs.NewCodeError(e.ErrCode, e.ErrMsg) }
 
-type HTTPError struct{ StatusCode int }
+type HTTPError struct {
+	StatusCode int
+	RetryAfter time.Duration
+}
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("sync v2 HTTP status %d", e.StatusCode) }
 
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL          string
+	token            string
+	http             *http.Client
+	clusterAdmission atomic.Bool
+	requestSlot      chan struct{}
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 70 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient, requestSlot: make(chan struct{}, 1)}
 }
 
 func (c *Client) invoke(ctx context.Context, operationID, route string, req, resp proto.Message) (json.RawMessage, error) {
+	if !c.clusterAdmission.Load() {
+		return c.invokeOnce(ctx, operationID, route, req, resp)
+	}
+	// One client belongs to one authenticated runtime. Share admission across
+	// startup, foreground history and durable retries, not just each worker pool.
+	select {
+	case c.requestSlot <- struct{}{}:
+		defer func() { <-c.requestSlot }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		raw, err := c.invokeOnce(ctx, operationID, route, req, resp)
+		if err == nil || attempt == 3 || !isAdmissionRetry(err) {
+			return raw, err
+		}
+		if err = waitAdmissionRetry(ctx, err, attempt); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (c *Client) invokeOnce(ctx context.Context, operationID, route string, req, resp proto.Message) (json.RawMessage, error) {
 	if operationID == "" {
 		return nil, fmt.Errorf("sync v2: operationID is required")
 	}
@@ -81,7 +117,7 @@ func (c *Client) invoke(ctx context.Context, operationID, route string, req, res
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: %w", route, &HTTPError{StatusCode: response.StatusCode})
+		return nil, fmt.Errorf("%s: %w", route, &HTTPError{StatusCode: response.StatusCode, RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now())})
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
@@ -103,6 +139,19 @@ func (c *Client) invoke(ctx context.Context, operationID, route string, req, res
 		return nil, fmt.Errorf("sync v2: response is missing errCode")
 	}
 	if *envelope.ErrCode != 0 {
+		fields := []any{"operationID", operationID, "route", route, "diagnosticReason", diagnosticReason.FindString(envelope.ErrDlt)}
+		if pull, ok := req.(*pb.PullRequest); ok {
+			fields = append(fields, "notifications", pull.Notifications, "self", pull.Self, "sequenceCount", len(pull.Seqs))
+			if len(pull.Seqs) > 0 {
+				low, high := pull.Seqs[0], pull.Seqs[0]
+				for _, seq := range pull.Seqs {
+					low = min(low, seq)
+					high = max(high, seq)
+				}
+				fields = append(fields, "minRequestedSeq", low, "maxRequestedSeq", high)
+			}
+		}
+		log.ZWarn(ctx, "sync v2 API request failed", &APIError{ErrCode: *envelope.ErrCode, ErrMsg: envelope.ErrMsg}, fields...)
 		return nil, fmt.Errorf("%s: %w", route, &APIError{ErrCode: *envelope.ErrCode, ErrMsg: envelope.ErrMsg, ErrDlt: envelope.ErrDlt})
 	}
 	if len(envelope.Data) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) {
@@ -136,6 +185,7 @@ func (c *Client) Capabilities(ctx context.Context, op string, req *pb.UserReques
 	if resp.ConversationSyncV2 && (resp.PolicyVersion != PolicyVersion || resp.MaxBatchSize <= 0 || resp.MaxPageSize <= 0 || resp.SnapshotTTLSeconds <= 0 || resp.MaxRequestBytes <= 0) {
 		return nil, fmt.Errorf("sync v2: incompatible capability contract")
 	}
+	c.clusterAdmission.Store(resp.ConversationSyncV2 && resp.ClusterReadAdmission)
 	return resp, nil
 }
 

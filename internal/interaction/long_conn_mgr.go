@@ -228,13 +228,13 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 	log.ZDebug(ctx, "readPump start", "goroutine ID:", getGoroutineID())
 	defer func() {
 		_ = c.close()
-		log.ZWarn(c.ctx, "readPump closed", c.closedErr)
+		log.ZWarn(c.ctx, "readPump closed", c.getClosedErr())
 	}()
 	connNum := 0
 	for {
 		select {
 		case <-ctx.Done():
-			c.closedErr = ctx.Err()
+			c.setClosedErr(ctx.Err())
 			log.ZInfo(c.ctx, "readPump done, sdk logout.....")
 			return
 		default:
@@ -242,7 +242,7 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 		needRecon, err := c.reConn(ctx, &connNum)
 		if !needRecon {
-			c.closedErr = err
+			c.setClosedErr(err)
 			return
 		}
 		if err != nil {
@@ -263,14 +263,14 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		case MessageBinary:
 			err := c.handleMessage(message)
 			if err != nil {
-				c.closedErr = err
+				c.setClosedErr(err)
 				return
 			}
 		case MessageText:
-			c.closedErr = ErrNotSupportMessageProtocol
+			c.setClosedErr(ErrNotSupportMessageProtocol)
 			return
 		case CloseMessage:
-			c.closedErr = ErrClientClosed
+			c.setClosedErr(ErrClientClosed)
 			return
 		default:
 		}
@@ -310,7 +310,7 @@ func (c *LongConnMgr) writePump(ctx context.Context) {
 		}
 		select {
 		case <-ctx.Done():
-			c.closedErr = ctx.Err()
+			c.setClosedErr(ctx.Err())
 			log.ZInfo(c.ctx, "writePump done, sdk logout.....")
 			return
 		case message, ok := <-c.send:
@@ -321,7 +321,7 @@ func (c *LongConnMgr) writePump(ctx context.Context) {
 				if err != nil {
 					log.ZError(c.ctx, "send close message error", err)
 				}
-				c.closedErr = ErrChanClosed
+				c.setClosedErr(ErrChanClosed)
 				return
 			}
 			c.processIncomingMessage(textLane, mediaLane, message)
@@ -552,7 +552,7 @@ func (c *LongConnMgr) writeBinaryMsgAndRetry(msg *GeneralWsReq) (chan *GeneralWs
 		err := c.writeBinaryMsg(*msg)
 		if err != nil {
 			log.ZError(c.ctx, "send binary message error", err, "message", msg)
-			c.closedErr = err
+			c.setClosedErr(err)
 			_ = c.close()
 			time.Sleep(time.Second * 1)
 			continue
@@ -911,7 +911,7 @@ func (c *LongConnMgr) doPushMsg(ctx context.Context, wsResp GeneralWsResp) error
 func (c *LongConnMgr) Close(ctx context.Context) {
 	if c.GetConnectionStatus() == Connected {
 		log.ZInfo(ctx, "network change conn close")
-		c.closedErr = errors.New("closed by client network change")
+		c.setClosedErr(errors.New("closed by client network change"))
 		err := c.close()
 		if err != nil {
 			log.ZWarn(ctx, "actively close err", err)
@@ -960,4 +960,17 @@ func (c *LongConnMgr) writePongMsg() error {
 	}
 
 	return c.conn.WriteMessage(PongMessage, nil)
+}
+
+// The read/write pumps and explicit shutdown all record the close cause.
+func (c *LongConnMgr) setClosedErr(err error) {
+	c.w.Lock()
+	defer c.w.Unlock()
+	c.closedErr = err
+}
+
+func (c *LongConnMgr) getClosedErr() error {
+	c.w.Lock()
+	defer c.w.Unlock()
+	return c.closedErr
 }

@@ -16,6 +16,21 @@ type BatchStreamStore interface {
 	GetConversationSyncV2Epochs(context.Context, []string) (map[string]uint64, error)
 }
 
+// Native stores can confirm unchanged streams in one read without reserving
+// thousands of epochs for scans that have no work to commit.
+// Carries state already validated and committed by metadata, with the exact
+// epochs from that transaction, never epochs sampled after the network read.
+type preparedChatStatesKey struct{}
+type preparedChatStates struct {
+	states      map[string]*pb.State
+	unavailable map[string]bool
+	epochs      map[string]uint64
+}
+
+type unchangedStreamStore interface {
+	UnchangedConversationSyncV2Streams(context.Context, map[string]uint64, []*pb.State, bool) (map[string]bool, error)
+}
+
 // Pending and unavailable streams remain separate from successfully scanned
 // streams. Neither outcome authorizes deleting their local history.
 type StreamResults struct {
@@ -30,6 +45,14 @@ type StreamResults struct {
 func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateRequest, caps *pb.Capabilities, store BatchStreamStore, commit CommitStream) (*StreamResults, error) {
 	if req == nil || caps == nil || caps.MaxBatchSize <= 0 || caps.MaxRequestBytes <= 0 || store == nil || commit == nil || req.IncludeDetails || req.IncludeSelf && !req.Notifications {
 		return nil, fmt.Errorf("sync v2: invalid stream batch")
+	}
+	var prefetched *preparedChatStates
+	if req.Notifications && len(req.ConversationIDs) > int(caps.MaxBatchSize) {
+		var err error
+		prefetched, err = c.prefetchNotificationStates(ctx, op, req, caps, store)
+		if err != nil {
+			return nil, err
+		}
 	}
 	result := new(StreamResults)
 	processed, total := 0, len(req.ConversationIDs)
@@ -69,13 +92,53 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				return err
 			}
 		}
-		epochs, err := store.GetConversationSyncV2Epochs(ctx, ids)
-		if err != nil {
-			return err
-		}
-		response, err := c.StatesBatched(ctx, op, &pb.StateRequest{UserID: req.UserID, ConversationIDs: parents, Notifications: req.Notifications, IncludeSelf: self}, caps)
-		if err != nil {
-			return err
+		var epochs map[string]uint64
+		var response *pb.StateResponse
+		var err error
+		prepared, _ := ctx.Value(preparedChatStatesKey{}).(*preparedChatStates)
+		if prepared != nil && !req.Notifications {
+			epochs = prepared.epochs
+			response = &pb.StateResponse{}
+			for _, id := range parents {
+				if state := prepared.states[id]; state != nil {
+					response.States = append(response.States, state)
+				}
+				if prepared.unavailable[id] {
+					response.UnavailableIDs = append(response.UnavailableIDs, id)
+				}
+			}
+		} else {
+			epochs, err = store.GetConversationSyncV2Epochs(ctx, ids)
+			if err != nil {
+				return err
+			}
+			reuse := prefetched != nil && !self
+			if reuse {
+				for _, id := range ids {
+					if captured, ok := prefetched.epochs[id]; !ok || captured != epochs[id] {
+						reuse = false
+						break
+					}
+				}
+			}
+			if reuse {
+				response = &pb.StateResponse{}
+				for _, id := range ids {
+					if state := prefetched.states[id]; state != nil {
+						response.States = append(response.States, state)
+					}
+				}
+				for _, parent := range parents {
+					if prefetched.unavailable[parent] {
+						response.UnavailableIDs = append(response.UnavailableIDs, parent)
+					}
+				}
+			} else {
+				response, err = c.StatesBatched(ctx, op, &pb.StateRequest{UserID: req.UserID, ConversationIDs: parents, Notifications: req.Notifications, IncludeSelf: self}, caps)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		states := make(map[string]*pb.State, len(response.States))
 		for _, state := range response.States {
@@ -92,6 +155,14 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				return fmt.Errorf("sync v2: inconsistent unavailable stream")
 			}
 			unavailable[id] = true
+		}
+
+		var unchanged map[string]bool
+		if idleStore, ok := store.(unchangedStreamStore); ok {
+			unchanged, err = idleStore.UnchangedConversationSyncV2Streams(ctx, epochs, response.States, !req.Notifications && ctx.Value(deferHistoricalChatHolesKey{}) == true)
+			if err != nil {
+				return err
+			}
 		}
 
 		const (
@@ -125,6 +196,13 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			epoch, ok := epochs[id]
 			if !ok {
 				return fmt.Errorf("sync v2: missing captured epoch")
+			}
+			if complete, idle := unchanged[id]; idle {
+				outcomes[index] = pending
+				if complete {
+					outcomes[index] = completed
+				}
+				return nil
 			}
 			stream, err := c.syncStreamState(ctx, op, queries[id], caps, store, serialCommit, epoch, states[id])
 			if RecoveryFor(err) == Unavailable {

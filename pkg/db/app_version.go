@@ -28,6 +28,12 @@ import (
 )
 
 func (d *DataBase) GetAppSDKVersion(ctx context.Context) (*model_struct.LocalAppSDKVersion, error) {
+	d.mRWMutex.RLock()
+	defer d.mRWMutex.RUnlock()
+	return d.getAppSDKVersion(ctx)
+}
+
+func (d *DataBase) getAppSDKVersion(ctx context.Context) (*model_struct.LocalAppSDKVersion, error) {
 	var appVersion model_struct.LocalAppSDKVersion
 	err := d.conn.WithContext(ctx).Take(&appVersion).Error
 	if err == gorm.ErrRecordNotFound {
@@ -37,6 +43,12 @@ func (d *DataBase) GetAppSDKVersion(ctx context.Context) (*model_struct.LocalApp
 }
 
 func (d *DataBase) SetAppSDKVersion(ctx context.Context, appVersion *model_struct.LocalAppSDKVersion) error {
+	d.mRWMutex.Lock()
+	defer d.mRWMutex.Unlock()
+	return d.setAppSDKVersion(ctx, appVersion)
+}
+
+func (d *DataBase) setAppSDKVersion(ctx context.Context, appVersion *model_struct.LocalAppSDKVersion) error {
 	var exist model_struct.LocalAppSDKVersion
 	err := d.conn.WithContext(ctx).First(&exist).Error
 	if err == gorm.ErrRecordNotFound {

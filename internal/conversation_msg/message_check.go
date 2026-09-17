@@ -847,10 +847,13 @@ func (c *Conversation) singleHandle(_ context.Context, self, others []*model_str
 
 }
 
-// groupHandle only reuses locally available member profiles. Message delivery must
-// not generate network requests merely to refresh sender names or avatars.
+// Complete snapshots and system notifications never trigger remote enrichment.
+// Ordinary messages with missing display fields retain bounded profile lookup.
 func (c *Conversation) groupHandle(ctx context.Context, self, others []*model_struct.LocalChatLog, lc *model_struct.LocalConversation) {
 	allMessage := append(self, others...)
+	for _, message := range allMessage {
+		reuseGroupNotificationSender(message)
+	}
 	allSenders := datautil.Slice(allMessage, func(e *model_struct.LocalChatLog) string { return e.SendID })
 	members, err := c.group.GetLocalGroupMemberProfiles(ctx, lc.GroupID, datautil.Distinct(allSenders))
 	if err != nil {
@@ -865,6 +868,60 @@ func (c *Conversation) groupHandle(ctx context.Context, self, others []*model_st
 				message.SenderNickname = member.Nickname
 			}
 		}
+	}
+	var missing []string
+	for _, message := range allMessage {
+		reuseGroupNotificationSender(message)
+		if message.ContentType < constant.NotificationBegin && members[message.SendID] == nil && (message.SenderNickname == "" || message.SenderFaceURL == "") {
+			missing = append(missing, message.SendID)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	profiles, _ := c.group.GetMissingDisplayProfiles(ctx, lc.GroupID, datautil.Distinct(missing))
+	for _, message := range allMessage {
+		if message.ContentType >= constant.NotificationBegin {
+			continue
+		}
+		if member := profiles[message.SendID]; member != nil {
+			if message.SenderNickname == "" {
+				message.SenderNickname = member.Nickname
+			}
+			if message.SenderFaceURL == "" {
+				message.SenderFaceURL = member.FaceURL
+			}
+		}
+	}
+}
+
+func reuseGroupNotificationSender(message *model_struct.LocalChatLog) {
+	var candidates []*sdkws.GroupMemberFullInfo
+	switch message.ContentType {
+	case constant.MemberEnterNotification:
+		var detail sdkws.MemberEnterTips
+		if utils.UnmarshalNotificationElem([]byte(message.Content), &detail) != nil {
+			return
+		}
+		candidates = []*sdkws.GroupMemberFullInfo{detail.EntrantUser}
+	case constant.MemberInvitedNotification:
+		var detail sdkws.MemberInvitedTips
+		if utils.UnmarshalNotificationElem([]byte(message.Content), &detail) != nil {
+			return
+		}
+		candidates = append([]*sdkws.GroupMemberFullInfo{detail.OpUser, detail.InviterUser}, detail.InvitedUserList...)
+	}
+	for _, member := range candidates {
+		if member == nil || member.UserID != message.SendID {
+			continue
+		}
+		if member.Nickname != "" {
+			message.SenderNickname = member.Nickname
+		}
+		if member.FaceURL != "" {
+			message.SenderFaceURL = member.FaceURL
+		}
+		return
 	}
 }
 

@@ -30,8 +30,6 @@ import (
 
 	pbConversation "github.com/openimsdk/protocol/conversation"
 	"github.com/openimsdk/protocol/sdkws"
-
-	"github.com/jinzhu/copier"
 )
 
 func (c *Conversation) GetAllConversationList(ctx context.Context) ([]*model_struct.LocalConversation, error) {
@@ -58,12 +56,21 @@ func (c *Conversation) GetAtAllTag(_ context.Context) string {
 }
 
 func (c *Conversation) GetOneConversation(ctx context.Context, sessionType int32, sourceID string) (*model_struct.LocalConversation, error) {
+	log.ZInfo(ctx, "get one conversation", "sessionType", sessionType, "sourceID", sourceID)
 	conversationID := c.getConversationIDBySessionType(sourceID, int(sessionType))
 	if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
 		// Explicitly opened conversations must refresh the authoritative
 		// server state even when they are outside the initial snapshot.
 		return c.activateConversationSyncV2(ctx, conversationID)
 	}
+	conversation, err := c.getOrCreateConversation(ctx, sessionType, sourceID, conversationID)
+	if err != nil {
+		log.ZError(ctx, "local conversation fallback failed", err, "conversationID", conversationID, "sessionType", sessionType, "sourceID", sourceID)
+	}
+	return conversation, err
+}
+
+func (c *Conversation) getOrCreateConversation(ctx context.Context, sessionType int32, sourceID, conversationID string) (*model_struct.LocalConversation, error) {
 	lc, err := c.db.GetConversation(ctx, conversationID)
 	if err == nil {
 		return lc, nil
@@ -206,6 +213,11 @@ func (c *Conversation) updateMsgStatusAndTriggerConversation(ctx context.Context
 	if err != nil {
 		log.ZWarn(ctx, "send message update message status error", err,
 			"sendTime", sendTime, "status", status, "clientMsgID", clientMsgID, "serverMsgID", serverMsgID)
+	}
+	if err == nil && status == constant.MsgStatusSendSuccess && c.syncV2 != nil {
+		if cleanupErr := c.syncV2.store.DeleteSendRequest(ctx, lc.ConversationID, clientMsgID); cleanupErr != nil {
+			log.ZWarn(ctx, "confirmed send request cleanup failed", cleanupErr)
+		}
 	}
 	err = c.db.DeleteSendingMessage(ctx, lc.ConversationID, clientMsgID)
 	if err != nil {
@@ -377,6 +389,13 @@ func (c *Conversation) sendMessage(ctx context.Context, s *sdk_struct.MsgStruct,
 		lc.LatestMsg = utils.StructToJsonString(s)
 		log.ZDebug(ctx, "send message come here", "conversion", *lc)
 		_ = common.TriggerCmdUpdateConversation(ctx, common.UpdateConNode{ConID: lc.ConversationID, Action: constant.AddConOrUpLatMsg, Args: *lc}, c.GetCh())
+	}
+
+	if restored, restoreErr := c.restoreFrozenSendRequest(ctx, s, lc, isOnlineOnly); restoreErr != nil {
+		c.updateMsgStatusAndTriggerConversation(ctx, s.ClientMsgID, "", s.CreateTime, constant.MsgStatusSendFailed, s, lc, isOnlineOnly)
+		return s, restoreErr
+	} else if restored {
+		return c.sendMessageToServer(ctx, s, lc, callback, c.frozenSendTempFiles(s), p, options, isOnlineOnly)
 	}
 
 	var delFile []string
@@ -730,27 +749,22 @@ func (c *Conversation) sendMessageToServer(ctx context.Context, s *sdk_struct.Ms
 		utils.SetSwitchFromOptions(options, constant.IsUnreadCount, false)
 		utils.SetSwitchFromOptions(options, constant.IsOfflinePush, false)
 	}
-	//Protocol conversion
-	var wsMsgData sdkws.MsgData
-	copier.Copy(&wsMsgData, s)
-	wsMsgData.AttachedInfo = utils.StructToJsonString(s.AttachedInfoElem)
-	wsMsgData.Content = []byte(s.Content)
-	wsMsgData.CreateTime = s.CreateTime
-	wsMsgData.SendTime = 0
-	wsMsgData.Options = options
-	if wsMsgData.ContentType == constant.AtText {
-		wsMsgData.AtUserIDList = s.AtTextElem.AtUserList
+	wsMsgData, err := c.prepareSendRequest(ctx, s, lc, offlinePushInfo, options, isOnlineOnly)
+	if err != nil {
+		if !sdkerrs.ErrMsgRepeated.Is(err) {
+			c.updateMsgStatusAndTriggerConversation(ctx, s.ClientMsgID, "", s.CreateTime, constant.MsgStatusSendFailed, s, lc, isOnlineOnly)
+		}
+		return s, err
 	}
-	wsMsgData.OfflinePushInfo = offlinePushInfo
 	s.Content = ""
 	var sendMsgResp sdkws.UserSendMsgResp
 
-	err := c.LongConnMgr.SendReqWaitResp(ctx, &wsMsgData, constant.SendMsg, &sendMsgResp)
+	err = c.LongConnMgr.SendReqWaitResp(ctx, wsMsgData, constant.SendMsg, &sendMsgResp)
 	if err != nil {
 		//if send message network timeout need to double-check message has received by db.
 		if sdkerrs.ErrNetworkTimeOut.Is(err) && !isOnlineOnly {
-			oldMessage, _ := c.db.GetMessage(ctx, lc.ConversationID, s.ClientMsgID)
-			if oldMessage.Status == constant.MsgStatusSendSuccess {
+			oldMessage, lookupErr := c.db.GetMessage(ctx, lc.ConversationID, s.ClientMsgID)
+			if lookupErr == nil && oldMessage != nil && oldMessage.Status == constant.MsgStatusSendSuccess {
 				sendMsgResp.SendTime = oldMessage.SendTime
 				sendMsgResp.ClientMsgID = oldMessage.ClientMsgID
 				sendMsgResp.ServerMsgID = oldMessage.ServerMsgID
@@ -770,6 +784,9 @@ func (c *Conversation) sendMessageToServer(ctx context.Context, s *sdk_struct.Ms
 	s.SendTime = sendMsgResp.SendTime
 	s.Status = constant.MsgStatusSendSuccess
 	s.ServerMsgID = sendMsgResp.ServerMsgID
+	// Finish status persistence before handing this message to the caller.
+	// The caller/bridge may serialize it immediately after return.
+	c.updateMsgStatusAndTriggerConversation(ctx, sendMsgResp.ClientMsgID, sendMsgResp.ServerMsgID, sendMsgResp.SendTime, constant.MsgStatusSendSuccess, s, lc, isOnlineOnly)
 	go func() {
 		//remove media cache file
 		for _, file := range delFiles {
@@ -780,7 +797,6 @@ func (c *Conversation) sendMessageToServer(ctx context.Context, s *sdk_struct.Ms
 			// log.ZDebug(ctx, "remove temp file:", "file", file)
 		}
 
-		c.updateMsgStatusAndTriggerConversation(ctx, sendMsgResp.ClientMsgID, sendMsgResp.ServerMsgID, sendMsgResp.SendTime, constant.MsgStatusSendSuccess, s, lc, isOnlineOnly)
 	}()
 	return s, nil
 
