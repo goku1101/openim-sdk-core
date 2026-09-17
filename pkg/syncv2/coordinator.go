@@ -67,7 +67,7 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	if !caps.ConversationSyncV2 {
 		return &SyncResult{Enabled: false, Capabilities: caps}, nil
 	}
-	log.ZInfo(ctx, "sync v2 scheduling capabilities", "incrementalRecovery", caps.IncrementalRecovery, "notificationPriorityPrefix", caps.NotificationPriorityPrefix, "directoryTokenGuard", caps.DirectoryTokenGuard, "clusterReadAdmission", caps.ClusterReadAdmission)
+	log.ZInfo(ctx, "sync v2 scheduling capabilities", "incrementalRecovery", caps.IncrementalRecovery, "notificationPriorityPrefix", caps.NotificationPriorityPrefix, "directoryTokenGuard", caps.DirectoryTokenGuard, "clusterReadAdmission", caps.ClusterReadAdmission, "multiStreamMessagePull", caps.MultiStreamMessagePull, "maxMessagePullStreams", caps.MaxMessagePullStreams, "maxMessagePullSeqs", caps.MaxMessagePullSeqs)
 	if caps.IncrementalRecovery && (caps.IncrementalRecoveryVersion != RecoveryVersion || caps.SyncDomainID == "" || caps.MaxChangePageSize <= 0) {
 		return nil, fmt.Errorf("sync v2: incompatible incremental recovery contract")
 	}

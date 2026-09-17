@@ -128,7 +128,7 @@ func (c *Client) syncAcceptedStreamState(ctx context.Context, op string, req *pb
 	if state.MaxSeq == 0 {
 		RecordDiagnostic(ctx, "empty_"+kind+"_streams", 1, 0, false)
 	}
-	batchSize := min(int(caps.MaxBatchSize), 500)
+	batchSize := notificationPageSize(req, caps)
 	attempted := make(map[int64]bool)
 	pull := func(seqs []int64, scanned int64) error {
 		result := new(pb.PullResponse)

@@ -30,6 +30,13 @@ message Capabilities {
   // State batches can validate the stable fingerprint of the directory that
   // produced their IDs. A mismatch fails before stale work is consumed.
   bool directoryTokenGuard = 17;
+  // New clients may combine multiple notification streams into one bounded
+  // message pull. Legacy clients keep using Pull unchanged.
+  bool multiStreamMessagePull = 18;
+  int32 maxMessagePullStreams = 19;
+  int32 maxMessagePullSeqsPerStream = 20;
+  int32 maxMessagePullSeqs = 21;
+  int32 maxMessagePullWorkers = 22;
 }
 message SnapshotRequest {
   string userID = 1;
@@ -110,6 +117,34 @@ message PullResponse {
   // Missing storage/cache entries are not authoritative deletion tombstones.
   repeated int64 unresolvedSeqs = 3;
 }
+message BatchPullItem {
+  // Client-generated correlation key. It is echoed verbatim and must be
+  // unique within the request so results never depend on response position.
+  string requestID = 1;
+  // Parent conversation ID. Empty only for self notifications.
+  string conversationID = 2;
+  repeated int64 seqs = 3;
+  bool notifications = 4;
+  bool self = 5;
+  string stateToken = 6;
+}
+message BatchPullRequest {
+  string userID = 1;
+  repeated BatchPullItem items = 2;
+}
+message BatchPullResult {
+  string requestID = 1;
+  string conversationID = 2;
+  bool self = 3;
+  State state = 4;
+  repeated openim.sdkws.MsgData messages = 5;
+  repeated int64 unresolvedSeqs = 6;
+  // Per-item canonical gRPC code and stable protocol reason. Zero means
+  // success. Internal dependency details are never returned here.
+  int32 errorCode = 7;
+  string errorReason = 8;
+}
+message BatchPullResponse { repeated BatchPullResult results = 1; }
 message ReleaseRequest { string userID = 1; string snapshotID = 2; }
 message ReleaseResponse {}
 message ScanRequest {
@@ -198,6 +233,7 @@ service MessageSync {
   rpc Probe(UserRequest) returns (Capabilities);
   rpc States(StateRequest) returns (StateResponse);
   rpc Pull(PullRequest) returns (PullResponse);
+  rpc BatchPull(BatchPullRequest) returns (BatchPullResponse);
 }
 service ConversationSync {
   rpc Probe(UserRequest) returns (Capabilities);

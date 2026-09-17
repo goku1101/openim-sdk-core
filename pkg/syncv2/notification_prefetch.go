@@ -20,6 +20,9 @@ type notificationPull struct {
 // Only the next four non-idle first pages are held in memory. Reads use the existing
 // account admission gate; handlers and durable cursors keep their original order.
 func (c *Client) consumeNotificationsPrefetched(ctx context.Context, op string, ids []string, queries map[string]*pb.PullRequest, states map[string]*pb.State, accepted map[string]*model_struct.LocalConversationSyncV2Stream, caps *pb.Capabilities, store BatchStreamStore, scan func(context.Context, int) error, publish func(int)) error {
+	if caps.MultiStreamMessagePull && !c.batchPullUnsupported.Load() {
+		return c.consumeNotificationsBatch(ctx, op, ids, queries, states, accepted, caps, store, scan, publish)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
@@ -40,7 +43,7 @@ func (c *Client) consumeNotificationsPrefetched(ctx context.Context, op string, 
 		}
 		q := proto.Clone(queries[id]).(*pb.PullRequest)
 		q.StateToken = stream.StateToken
-		end := lower + min(int64(min(int(caps.MaxBatchSize), 500)-1), upper-lower)
+		end := lower + min(int64(notificationPageSize(q, caps)-1), upper-lower)
 		for n := lower; ; n++ {
 			q.Seqs = append(q.Seqs, n)
 			if n == end {

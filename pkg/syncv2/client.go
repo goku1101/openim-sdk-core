@@ -51,12 +51,13 @@ type HTTPError struct {
 func (e *HTTPError) Error() string { return fmt.Sprintf("sync v2 HTTP status %d", e.StatusCode) }
 
 type Client struct {
-	baseURL          string
-	token            string
-	http             *http.Client
-	clusterAdmission atomic.Bool
-	requestSlot      requestAdmission
-	controlSlot      requestAdmission
+	baseURL              string
+	token                string
+	http                 *http.Client
+	clusterAdmission     atomic.Bool
+	batchPullUnsupported atomic.Bool
+	requestSlot          requestAdmission
+	controlSlot          requestAdmission
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
@@ -73,7 +74,7 @@ func (c *Client) invoke(ctx context.Context, operationID, route string, req, res
 	// State/message reads share the server's two-slot read budget. Keep
 	// snapshot/scan/control work serial: build and scan have a one-slot budget.
 	switch req.(type) {
-	case *pb.StateRequest, *pb.PullRequest:
+	case *pb.StateRequest, *pb.PullRequest, *pb.BatchPullRequest:
 	default:
 		if err := c.controlSlot.acquire(ctx); err != nil {
 			return nil, err
@@ -202,6 +203,9 @@ func (c *Client) Capabilities(ctx context.Context, op string, req *pb.UserReques
 	}
 	if resp.ConversationSyncV2 && (resp.PolicyVersion != PolicyVersion || resp.MaxBatchSize <= 0 || resp.MaxPageSize <= 0 || resp.SnapshotTTLSeconds <= 0 || resp.MaxRequestBytes <= 0) {
 		return nil, fmt.Errorf("sync v2: incompatible capability contract")
+	}
+	if resp.MultiStreamMessagePull && (resp.MaxMessagePullStreams <= 0 || resp.MaxMessagePullSeqsPerStream <= 0 || resp.MaxMessagePullSeqs <= 0 || resp.MaxMessagePullWorkers <= 0) {
+		return nil, fmt.Errorf("sync v2: invalid multi-stream capability limits")
 	}
 	c.clusterAdmission.Store(resp.ConversationSyncV2 && resp.ClusterReadAdmission)
 	return resp, nil
