@@ -8,11 +8,55 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 )
+
+func TestAdmissionReadCapacityAndSerialControl(t *testing.T) {
+	for _, control := range []bool{false, true} {
+		t.Run(fmt.Sprint(control), func(t *testing.T) {
+			var active, peak atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n := active.Add(1)
+				defer active.Add(-1)
+				for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+				}
+				time.Sleep(25 * time.Millisecond)
+				fmt.Fprint(w, `{"errCode":0,"data":{}}`)
+			}))
+			defer server.Close()
+			client := NewClient(server.URL, "", server.Client())
+			client.clusterAdmission.Store(true)
+			var wg sync.WaitGroup
+			for i := 0; i < 8; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					var err error
+					if control {
+						_, err = client.invoke(context.Background(), "control", "/control", &pb.SnapshotRequest{}, &pb.SnapshotResponse{})
+					} else {
+						_, err = client.Pull(context.Background(), "read", &pb.PullRequest{ConversationID: "fixture", Seqs: []int64{1}})
+					}
+					if err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+			wg.Wait()
+			want := int32(2)
+			if control {
+				want = 1
+			}
+			if peak.Load() != want {
+				t.Fatalf("peak=%d want=%d", peak.Load(), want)
+			}
+		})
+	}
+}
 
 func waitAdmissionQueue(t *testing.T, gate *requestAdmission, foreground, background int) {
 	t.Helper()
@@ -37,6 +81,7 @@ func TestAdmissionPrioritizesForegroundWithoutStarvingBackground(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewClient(server.URL, "", server.Client())
+	client.requestSlot.limit = 1 // isolate queue fairness from available capacity
 	client.clusterAdmission.Store(true)
 	if err := client.requestSlot.acquire(context.Background()); err != nil {
 		t.Fatal(err)

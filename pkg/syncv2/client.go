@@ -56,18 +56,29 @@ type Client struct {
 	http             *http.Client
 	clusterAdmission atomic.Bool
 	requestSlot      requestAdmission
+	controlSlot      requestAdmission
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 70 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient, requestSlot: requestAdmission{limit: 2}}
 }
 
 func (c *Client) invoke(ctx context.Context, operationID, route string, req, resp proto.Message) (json.RawMessage, error) {
 	if !c.clusterAdmission.Load() {
 		return c.invokeMeasured(ctx, operationID, route, req, resp)
+	}
+	// State/message reads share the server's two-slot read budget. Keep
+	// snapshot/scan/control work serial: build and scan have a one-slot budget.
+	switch req.(type) {
+	case *pb.StateRequest, *pb.PullRequest:
+	default:
+		if err := c.controlSlot.acquire(ctx); err != nil {
+			return nil, err
+		}
+		defer c.controlSlot.release()
 	}
 	// One client belongs to one authenticated runtime. Share admission across
 	// startup, foreground history and durable retries, not just each worker pool.

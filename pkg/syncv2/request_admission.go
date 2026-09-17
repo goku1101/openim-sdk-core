@@ -18,11 +18,12 @@ type admissionWaiter struct {
 	granted bool
 }
 
-// One request at a time. After four foreground grants, a waiting background
+// Bounded in-flight requests. After four foreground grants, a waiting background
 // read gets a turn, so an active chat cannot starve durable catchup forever.
 type requestAdmission struct {
 	mu                     sync.Mutex
-	busy                   bool
+	active                 int
+	limit                  int // zero defaults to one for serial control operations
 	foreground, background []*admissionWaiter
 	foregroundGrants       int
 }
@@ -33,8 +34,8 @@ func (a *requestAdmission) acquire(ctx context.Context) error {
 		a.mu.Unlock()
 		return err
 	}
-	if !a.busy {
-		a.busy = true
+	if a.active < max(1, a.limit) {
+		a.active++
 		a.mu.Unlock()
 		return nil
 	}
@@ -89,7 +90,7 @@ func (a *requestAdmission) release() {
 		a.foregroundGrants = 0
 	}
 	if len(*queue) == 0 {
-		a.busy = false
+		a.active--
 		return
 	}
 	w := (*queue)[0]

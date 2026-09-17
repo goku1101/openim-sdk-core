@@ -89,7 +89,7 @@ func TestNotificationPrefetchOrderAdmissionAndInvalidation(t *testing.T) {
 					t.Fatal("duplicate network requests", pulls.Load())
 				}
 			}
-			if peak.Load() != 1 {
+			if peak.Load() != 2 {
 				t.Fatal("account admission bypassed", peak.Load())
 			}
 		})
