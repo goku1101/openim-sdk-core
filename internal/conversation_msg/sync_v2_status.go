@@ -2,7 +2,7 @@ package conversation_msg
 
 import "github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 
-// This query never waits for runMu, HTTP, SQLite or the conversation queue.
+// This query never waits for the run gate, HTTP, SQLite or the conversation queue.
 // A rebuilt JS runtime can observe a synchronization already in progress.
 func (c *Conversation) GetConversationSyncState() sdk_struct.ConversationSyncState {
 	state := sdk_struct.ConversationSyncState{Mode: "uninitialized", Phase: "idle"}

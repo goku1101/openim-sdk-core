@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/openimsdk/openim-sdk-core/v3/internal/group"
@@ -18,6 +19,16 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 )
+
+type projectionQueueProbe struct{ *Conversation }
+
+func (p *projectionQueueProbe) Work(cmd common.Cmd2Value) {
+	if cmd.Cmd == "projection-test-event" {
+		cmd.Value.(func())()
+		return
+	}
+	p.Conversation.Work(cmd)
+}
 
 func TestSyncV2ProjectionProgressFollowsDurableBatches(t *testing.T) {
 	for _, invalidateLast := range []bool{false, true} {
@@ -52,9 +63,10 @@ func TestSyncV2ProjectionProgressFollowsDurableBatches(t *testing.T) {
 			c := NewConversation(ctx, &interaction.LongConnMgr{}, database, queue, nil, relation.NewFriend("u", database, u, queue), group.NewGroup("u", database, queue), u, nil)
 			c.ConfigureConversationSyncV2(ctx)
 			stopped := make(chan struct{})
-			go func() { defer close(stopped); common.DoListener(ctx, c) }()
+			go func() { defer close(stopped); common.DoListener(ctx, &projectionQueueProbe{c}) }()
 			defer func() { cancel(); <-stopped }()
 			var batches []int
+			var eventProcessed atomic.Bool
 			err = c.publishConversationSyncV2WithProgress(ctx, cp, func(done, total int) {
 				batches = append(batches, done)
 				if total != 301 {
@@ -64,10 +76,18 @@ func TestSyncV2ProjectionProgressFollowsDurableBatches(t *testing.T) {
 				if readErr != nil || row == nil || row.LatestMsg != "" || row.DraftText != "keep-draft" {
 					t.Errorf("reported before durable projection: %+v %v", row, readErr)
 				}
-				if invalidateLast && done == 300 {
-					if e := database.InvalidateConversationSyncV2Stream(ctx, cp.SelectedIDs[300]); e != nil {
-						t.Error(e)
-					}
+				if done == 300 {
+					queue <- common.Cmd2Value{Cmd: "projection-test-event", Ctx: ctx, Value: func() {
+						if invalidateLast {
+							if e := database.InvalidateConversationSyncV2Stream(ctx, cp.SelectedIDs[300]); e != nil {
+								t.Error(e)
+							}
+						}
+						eventProcessed.Store(true)
+					}}
+				}
+				if done == 301 && !eventProcessed.Load() {
+					t.Error("projection blocked queued event until all batches completed")
 				}
 			})
 			expected := []int{300, 301}

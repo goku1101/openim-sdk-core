@@ -53,10 +53,22 @@ func TestNotificationPrefetchOverlapsReadsButRechecksInvalidations(t *testing.T)
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	var prefetched int
+	ctx = WithDetailProgress(ctx, func(d DetailProgress) {
+		if d.Stage == "notification_states" {
+			if d.Total == nil || *d.Total != 2 {
+				t.Errorf("per-batch total leaked: %+v", d)
+			}
+			prefetched = d.Completed
+		}
+	})
 	store := &notificationInvalidationStore{batchStreamMemory: batchStreamMemory{epochs: map[string]uint64{}}}
 	result, err := NewClient(server.URL, "", server.Client()).SyncStreams(ctx, "prefetch", &pb.StateRequest{UserID: "u", ConversationIDs: []string{"sg_a", "sg_b"}, Notifications: true}, &pb.Capabilities{MaxBatchSize: 1, MaxRequestBytes: 65536}, store, func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error { return nil })
 	if err != nil || result.Completed != 2 {
 		t.Fatalf("prefetch failed: %v %v", result, err)
+	}
+	if prefetched != 2 {
+		t.Fatalf("missing aggregate progress: %d", prefetched)
 	}
 	mu.Lock()
 	defer mu.Unlock()

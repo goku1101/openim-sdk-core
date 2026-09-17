@@ -123,6 +123,10 @@ func TestSyncV2RuntimeBoundsUnexpectedEOFRetries(t *testing.T) {
 	testSyncV2BoundedTransportRetries(t, io.ErrUnexpectedEOF)
 }
 
+func TestSyncV2RuntimeBoundsEOFRetries(t *testing.T) {
+	testSyncV2BoundedTransportRetries(t, io.EOF)
+}
+
 func testSyncV2BoundedTransportRetries(t *testing.T, failure error) {
 	t.Helper()
 	for _, resets := range []int{1, 2} {

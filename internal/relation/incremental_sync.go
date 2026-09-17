@@ -2,6 +2,7 @@ package relation
 
 import (
 	"context"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncer"
@@ -47,7 +48,7 @@ func (r *Relation) IncrSyncFriends(ctx context.Context) error {
 			return r.friendSyncer.Sync(ctx, server, local, nil)
 		},
 		FullSyncer: func(ctx context.Context) error {
-			return r.friendSyncer.FullSync(ctx, r.loginUserID)
+			return r.friendSyncer.FullSyncWithProgress(ctx, r.loginUserID, func(done int) { syncv2.ReportDetailProgress(ctx, "friends", "friends", done, nil) })
 		},
 		FullID: func(ctx context.Context) ([]string, error) {
 			resp, err := r.getFullFriendUserIDs(ctx, &relation.GetFullFriendUserIDsReq{

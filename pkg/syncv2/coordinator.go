@@ -100,6 +100,10 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 			if err = hooks.PrepareRelated(ctx); err != nil {
 				return nil, err
 			}
+			checkpointBefore, err = reloadAfterRelated(ctx, store, checkpointBefore)
+			if err != nil {
+				return nil, err
+			}
 			return c.recoverChanges(ctx, op, checkpointBefore, caps, store, hooks)
 		}
 	}
@@ -166,6 +170,10 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 		round.Checkpoint = checkpoint
 	}
 	if err = hooks.PrepareRelated(ctx); err != nil {
+		return nil, err
+	}
+	round.Checkpoint, err = reloadAfterRelated(ctx, store, round.Checkpoint)
+	if err != nil {
 		return nil, err
 	}
 	report(20)
@@ -238,8 +246,10 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	}
 	// Projection may take multiple batches on an existing large account. Report
 	// only committed batches, reserving 99 for the durable ready checkpoint.
+	ReportDetailProgress(ctx, "publishing", "conversations", 0, nil)
 	publishStart := lastProgress
 	if err = hooks.Publish(ctx, checkpoint, func(done, total int) {
+		reportCount(ctx, "publishing", "conversations", done, total)
 		if total > 0 {
 			report(publishStart + (98-publishStart)*done/total)
 		}
@@ -263,6 +273,19 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	}
 	report(99)
 	return result, nil
+}
+
+// Foreground activation may add selected conversations while directories are
+// fetched. Continue from the committed checkpoint, never the pre-wait copy.
+func reloadAfterRelated(ctx context.Context, store CoordinatorStore, before *model_struct.LocalConversationSyncV2) (*model_struct.LocalConversationSyncV2, error) {
+	current, err := store.GetConversationSyncV2(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil || current.Generation != before.Generation || current.UserID != before.UserID || current.PolicyVersion != before.PolicyVersion || current.SyncDomainID != before.SyncDomainID || current.RecoveryVersion != before.RecoveryVersion {
+		return nil, fmt.Errorf("sync v2: background baseline replaced during related synchronization")
+	}
+	return current, nil
 }
 
 // A snapshot selects currently unread chats that need not appear in the metadata

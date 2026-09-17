@@ -13,6 +13,7 @@ import (
 // before consumption, because an earlier notification can invalidate a later one.
 func (c *Client) prefetchNotificationStates(ctx context.Context, op string, req *pb.StateRequest, caps *pb.Capabilities, store BatchStreamStore) (*preparedChatStates, error) {
 	result := &preparedChatStates{states: map[string]*pb.State{}, unavailable: map[string]bool{}, epochs: map[string]uint64{}}
+	reportCount(ctx, "notification_states", "streams", 0, len(req.ConversationIDs))
 	size := min(int(caps.MaxBatchSize), 500)
 	for start := 0; start < len(req.ConversationIDs); start += 4 * size {
 		end := min(start+4*size, len(req.ConversationIDs))
@@ -70,6 +71,7 @@ func (c *Client) prefetchNotificationStates(ctx context.Context, op string, req 
 		if err := group.Wait(); err != nil {
 			return nil, err
 		}
+		reportCount(ctx, "notification_states", "streams", end, len(req.ConversationIDs))
 		for _, batch := range results {
 			for id, state := range batch.states {
 				result.states[id] = state

@@ -55,37 +55,44 @@ type Client struct {
 	token            string
 	http             *http.Client
 	clusterAdmission atomic.Bool
-	requestSlot      chan struct{}
+	requestSlot      requestAdmission
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 70 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient, requestSlot: make(chan struct{}, 1)}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient}
 }
 
 func (c *Client) invoke(ctx context.Context, operationID, route string, req, resp proto.Message) (json.RawMessage, error) {
 	if !c.clusterAdmission.Load() {
-		return c.invokeOnce(ctx, operationID, route, req, resp)
+		return c.invokeMeasured(ctx, operationID, route, req, resp)
 	}
 	// One client belongs to one authenticated runtime. Share admission across
 	// startup, foreground history and durable retries, not just each worker pool.
-	select {
-	case c.requestSlot <- struct{}{}:
-		defer func() { <-c.requestSlot }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 	for attempt := 0; ; attempt++ {
-		if err := ctx.Err(); err != nil {
+		slotStart := time.Now()
+		slotErr := c.requestSlot.acquire(ctx)
+		RecordDiagnostic(ctx, "slot_"+requestDiagnosticKind(req), 0, time.Since(slotStart), slotErr != nil)
+		if err := slotErr; err != nil {
 			return nil, err
 		}
-		raw, err := c.invokeOnce(ctx, operationID, route, req, resp)
+		if err := ctx.Err(); err != nil {
+			c.requestSlot.release()
+			return nil, err
+		}
+		raw, err := c.invokeMeasured(ctx, operationID, route, req, resp)
+		// Admission limits in-flight requests, not a caller's retry timer.
+		// Let other reads proceed while this request honors its backoff.
+		c.requestSlot.release()
 		if err == nil || attempt == 3 || !isAdmissionRetry(err) {
 			return raw, err
 		}
-		if err = waitAdmissionRetry(ctx, err, attempt); err != nil {
+		retryStart := time.Now()
+		err = waitAdmissionRetry(ctx, err, attempt)
+		RecordDiagnostic(ctx, "backoff_"+requestDiagnosticKind(req), 0, time.Since(retryStart), err != nil)
+		if err != nil {
 			return nil, err
 		}
 	}

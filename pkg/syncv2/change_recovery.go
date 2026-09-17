@@ -45,6 +45,7 @@ func (c *Client) recoverChanges(ctx context.Context, op string, checkpoint *mode
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		ReportDetailProgress(ctx, "changes", "", 0, nil)
 		before := result.Checkpoint
 		page, err := c.Changes(ctx, op, &pb.ChangeRequest{UserID: before.UserID, Cursor: before.ChangeCursor, UntilCursor: before.ChangeUntilCursor, PageSize: min(caps.MaxChangePageSize, 500)})
 		if err != nil {
@@ -144,7 +145,7 @@ func (c *Client) recoverChanges(ctx context.Context, op string, checkpoint *mode
 			projection := *result.Checkpoint
 			projection.SelectedIDs = affected
 			if len(affected) > 0 {
-				if err = hooks.Publish(ctx, &projection, nil); err != nil {
+				if err = hooks.Publish(ctx, &projection, func(done, total int) { reportCount(ctx, "publishing", "conversations", done, total) }); err != nil {
 					return nil, err
 				}
 			}

@@ -43,7 +43,7 @@ func RecoveryFor(err error) Recovery {
 			return Retry
 		}
 		var transportError *url.Error
-		if errors.As(err, &transportError) && errors.Is(transportError.Err, io.ErrUnexpectedEOF) {
+		if errors.As(err, &transportError) && (errors.Is(transportError.Err, io.ErrUnexpectedEOF) || errors.Is(transportError.Err, io.EOF)) {
 			return Retry
 		}
 		var networkError net.Error

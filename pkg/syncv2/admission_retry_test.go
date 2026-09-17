@@ -80,13 +80,15 @@ func TestNegotiatedAdmissionSerializesRequestsAndRetriesSameRead(t *testing.T) {
 	if peak.Load() != 1 || calls.Load() != 5 {
 		t.Fatalf("peak=%d calls=%d", peak.Load(), calls.Load())
 	}
-	client.requestSlot <- struct{}{}
+	if err := client.requestSlot.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := client.Pull(ctx, "op", &pb.PullRequest{}); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	<-client.requestSlot
+	client.requestSlot.release()
 	if calls.Load() != 5 {
 		t.Fatal("canceled waiter reached network")
 	}
@@ -120,5 +122,42 @@ func TestGatewayFailureRetriesSameRead(t *testing.T) {
 				t.Fatalf("calls=%d", calls)
 			}
 		})
+	}
+}
+
+func TestAdmissionBackoffDoesNotBlockAnotherRead(t *testing.T) {
+	backoffStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("operationID") == "background" {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			close(backoffStarted)
+			return
+		}
+		fmt.Fprint(w, `{"errCode":0,"data":{}}`)
+	}))
+	defer server.Close()
+	client := NewClient(server.URL, "", server.Client())
+	client.clusterAdmission.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Pull(ctx, "background", &pb.PullRequest{ConversationID: "background", Seqs: []int64{1}})
+		done <- err
+	}()
+	select {
+	case <-backoffStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background request did not reach server")
+	}
+	foreground, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if _, err := client.Pull(foreground, "foreground", &pb.PullRequest{ConversationID: "opened", Seqs: []int64{1}}); err != nil {
+		t.Errorf("another read was blocked by background backoff: %v", err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("background retry ignored cancellation: %v", err)
 	}
 }

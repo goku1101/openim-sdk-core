@@ -18,6 +18,7 @@ import (
 type historyUnresolvedKey struct{}
 
 func (c *Conversation) fetchConversationSyncV2History(ctx context.Context, id string, seqs []int64, isReverse bool, count int, list *[]*model_struct.LocalChatLog, callback *sdk.GetAdvancedHistoryMessageListCallback) {
+	ctx = syncv2.WithForegroundRead(ctx)
 	if callback.ErrCode != 0 {
 		return
 	}
@@ -99,6 +100,7 @@ func (c *Conversation) fetchConversationSyncV2History(ctx context.Context, id st
 }
 
 func (c *Conversation) ensureConversationSyncV2HistoryState(ctx context.Context, id string) error {
+	ctx = syncv2.WithForegroundRead(ctx)
 	runtime := c.syncV2
 	if runtime.mode.Load() != syncV2Enabled {
 		return syncv2.ErrStatePending

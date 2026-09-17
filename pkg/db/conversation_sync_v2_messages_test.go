@@ -9,6 +9,34 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 )
 
+func TestSyncV2NotificationStateBatchIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	d, err := NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close(ctx)
+	states := []*model_struct.LocalConversationSyncV2Stream{
+		{ConversationID: "n_u_a", ParentID: "si_u_a", Notifications: true, StateToken: "a", MinSeq: 1, Epoch: 0},
+		{ConversationID: "n_u_b", ParentID: "si_u_b", Notifications: true, StateToken: "b", MinSeq: 1, Epoch: 0},
+	}
+	accepted, err := d.AcceptConversationSyncV2States(ctx, states)
+	if err != nil || len(accepted) != 2 {
+		t.Fatalf("batch accept failed: %v %+v", err, accepted)
+	}
+	if accepted["n_u_a"].Epoch != 1 || !accepted["n_u_b"].Initialized {
+		t.Fatalf("batch state not initialized: %+v", accepted)
+	}
+	_, err = d.AcceptConversationSyncV2States(ctx, []*model_struct.LocalConversationSyncV2Stream{{ConversationID: "n_u_a", ParentID: "si_u_a", Notifications: true, StateToken: "next", MinSeq: 1, Epoch: 0}, {ConversationID: "n_u_b", ParentID: "si_u_b", Notifications: true, StateToken: "next", MinSeq: 1, Epoch: 1}})
+	if err == nil {
+		t.Fatal("stale member unexpectedly committed")
+	}
+	got, err := d.GetConversationSyncV2Stream(ctx, "n_u_a")
+	if err != nil || got.StateToken != "a" || got.Epoch != 1 {
+		t.Fatalf("batch was partially committed: %+v %v", got, err)
+	}
+}
+
 func TestSyncV2MessageProgressRetainsHolesAcrossRestart(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

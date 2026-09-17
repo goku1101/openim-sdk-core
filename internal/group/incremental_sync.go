@@ -2,6 +2,7 @@ package group
 
 import (
 	"context"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncer"
@@ -53,14 +54,20 @@ func (g *Group) IncrSyncJoinGroupMember(ctx context.Context, groupIDs ...string)
 }
 
 func (g *Group) IncrSyncGroupAndMember(ctx context.Context, groupIDs ...string) error {
+	groupIDs = datautil.Distinct(groupIDs)
+	progress := &memberSyncProgress{total: len(groupIDs)}
+	ctx = context.WithValue(ctx, memberSyncProgressKey{}, progress)
+	syncv2.ReportGroupMemberProgress(ctx, 0, progress.total, nil)
 	legacy := make([]string, 0, len(groupIDs))
-	for _, id := range datautil.Distinct(groupIDs) {
+	for _, id := range groupIDs {
 		handled, err := g.syncPartialGroup(ctx, id)
 		if err != nil {
 			return err
 		}
 		if !handled {
 			legacy = append(legacy, id)
+		} else {
+			progress.complete(ctx)
 		}
 	}
 	return g.syncLegacyGroupAndMember(ctx, legacy...)
@@ -105,6 +112,9 @@ func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string
 		}
 		if len(groupVersion) == 0 {
 			for _, req := range groups {
+				if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
+					progress.complete(ctx)
+				}
 				delete(groupIDSet, req.GroupID)
 			}
 			continue
@@ -113,6 +123,9 @@ func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string
 		for groupID, resp := range groupVersion {
 			if err := g.syncGroupAndMember(ctx, groupID, resp); err != nil {
 				return err
+			}
+			if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
+				progress.complete(ctx)
 			}
 			delete(groupIDSet, groupID)
 		}
@@ -180,7 +193,11 @@ func (g *Group) syncGroupAndMember(ctx context.Context, groupID string, resp *gr
 			return g.groupMemberSyncer.Sync(ctx, server, local, nil)
 		},
 		FullSyncer: func(ctx context.Context) error {
-			return g.groupMemberSyncer.FullSync(ctx, groupID)
+			return g.groupMemberSyncer.FullSyncWithProgress(ctx, groupID, func(done int) {
+				if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
+					syncv2.ReportGroupMemberProgress(ctx, progress.done, progress.total, &done)
+				}
+			})
 		},
 		FullID: func(ctx context.Context) ([]string, error) {
 			resp, err := g.getFullGroupMemberUserIDs(ctx, &group.GetFullGroupMemberUserIDsReq{
@@ -316,7 +333,11 @@ func (g *Group) onlineSyncGroupAndMember(ctx context.Context, groupID string, de
 			return g.groupMemberSyncer.Sync(ctx, server, local, nil)
 		},
 		FullSyncer: func(ctx context.Context) error {
-			return g.groupMemberSyncer.FullSync(ctx, groupID)
+			return g.groupMemberSyncer.FullSyncWithProgress(ctx, groupID, func(done int) {
+				if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
+					syncv2.ReportGroupMemberProgress(ctx, progress.done, progress.total, &done)
+				}
+			})
 		},
 		FullID: func(ctx context.Context) ([]string, error) {
 			resp, err := g.getFullGroupMemberUserIDs(ctx, &group.GetFullGroupMemberUserIDsReq{
@@ -380,7 +401,7 @@ func (g *Group) IncrSyncJoinGroupAndGetIDs(ctx context.Context) ([]string, error
 			return g.groupSyncer.Sync(ctx, server, local, nil)
 		},
 		FullSyncer: func(ctx context.Context) error {
-			return g.groupSyncer.FullSync(ctx, g.loginUserID)
+			return g.groupSyncer.FullSyncWithProgress(ctx, g.loginUserID, func(done int) { syncv2.ReportDetailProgress(ctx, "groups", "groups", done, nil) })
 		},
 		FullID: func(ctx context.Context) ([]string, error) {
 			resp, err := g.getFullJoinGroupIDs(ctx, &group.GetFullJoinGroupIDsReq{

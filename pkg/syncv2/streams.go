@@ -16,6 +16,12 @@ type BatchStreamStore interface {
 	GetConversationSyncV2Epochs(context.Context, []string) (map[string]uint64, error)
 }
 
+// BatchStateStore may accept notification states in one local transaction.
+// Implementations must preserve the same epoch checks as the single-state API.
+type BatchStateStore interface {
+	AcceptConversationSyncV2States(context.Context, []*model_struct.LocalConversationSyncV2Stream) (map[string]*model_struct.LocalConversationSyncV2Stream, error)
+}
+
 // Native stores can confirm unchanged streams in one read without reserving
 // thousands of epochs for scans that have no work to commit.
 // Carries state already validated and committed by metadata, with the exact
@@ -60,8 +66,14 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 		total++
 	}
 	progress, _ := ctx.Value(streamProgressKey{}).(func(int, int))
+	stage, unit := "messages", "conversations"
+	if req.Notifications {
+		stage, unit = "notifications", "streams"
+	}
+	reportCount(ctx, stage, unit, 0, total)
 	advance := func() {
 		processed++
+		reportCount(ctx, stage, unit, processed, total)
 		if progress != nil {
 			progress(processed, total)
 		}
@@ -171,6 +183,24 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			denied
 		)
 		outcomes := make([]int8, len(ids))
+		accepted := map[string]*model_struct.LocalConversationSyncV2Stream{}
+		if req.Notifications {
+			if batchStore, ok := store.(BatchStateStore); ok {
+				statesToAccept := make([]*model_struct.LocalConversationSyncV2Stream, 0, len(ids))
+				for _, id := range ids {
+					if unavailable[id] || states[id] == nil || !states[id].Known {
+						continue
+					}
+					query := queries[id]
+					statesToAccept = append(statesToAccept, &model_struct.LocalConversationSyncV2Stream{ConversationID: id, ParentID: query.ConversationID, Notifications: true, Self: query.Self, StateToken: states[id].StateToken, MinSeq: states[id].MinSeq, PermissionMaxSeq: states[id].PermissionMaxSeq, Epoch: epochs[id]})
+				}
+				var acceptErr error
+				accepted, acceptErr = batchStore.AcceptConversationSyncV2States(ctx, statesToAccept)
+				if acceptErr != nil {
+					return acceptErr
+				}
+			}
+		}
 		var commitMu sync.Mutex
 		serialCommit := func(ctx context.Context, p *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
 			commitMu.Lock()
@@ -204,7 +234,12 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				}
 				return nil
 			}
-			stream, err := c.syncStreamState(ctx, op, queries[id], caps, store, serialCommit, epoch, states[id])
+			var stream *model_struct.LocalConversationSyncV2Stream
+			if preaccepted := accepted[id]; preaccepted != nil {
+				stream, err = c.syncAcceptedStreamState(ctx, op, queries[id], caps, store, serialCommit, preaccepted, states[id])
+			} else {
+				stream, err = c.syncStreamState(ctx, op, queries[id], caps, store, serialCommit, epoch, states[id])
+			}
 			if RecoveryFor(err) == Unavailable {
 				outcomes[index] = denied
 				return nil

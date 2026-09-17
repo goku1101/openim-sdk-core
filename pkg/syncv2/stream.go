@@ -104,11 +104,30 @@ func (c *Client) syncStreamState(ctx context.Context, op string, req *pb.PullReq
 	if err != nil {
 		return nil, err
 	}
+	return c.syncAcceptedStreamState(ctx, op, req, caps, store, commit, stream, state)
+}
+
+func (c *Client) syncAcceptedStreamState(ctx context.Context, op string, req *pb.PullRequest, caps *pb.Capabilities, store StreamStore, commit CommitStream, stream *model_struct.LocalConversationSyncV2Stream, state *pb.State) (*model_struct.LocalConversationSyncV2Stream, error) {
+	id, err := pullStreamID(req)
+	if err != nil {
+		return nil, err
+	}
+	if stream == nil || state == nil || stream.ConversationID != state.ConversationID || stream.StateToken != state.StateToken {
+		return nil, fmt.Errorf("sync v2: inconsistent accepted stream state")
+	}
 	upper := state.MaxSeq
 	if state.PermissionMaxSeq > 0 {
 		upper = min(upper, state.PermissionMaxSeq)
 	}
 	lower := max(int64(1), state.MinSeq)
+	kind := "chat"
+	if req.Notifications {
+		kind = "notification"
+	}
+	RecordDiagnostic(ctx, "visited_"+kind+"_streams", 1, 0, false)
+	if state.MaxSeq == 0 {
+		RecordDiagnostic(ctx, "empty_"+kind+"_streams", 1, 0, false)
+	}
 	batchSize := min(int(caps.MaxBatchSize), 500)
 	attempted := make(map[int64]bool)
 	pull := func(seqs []int64, scanned int64) error {

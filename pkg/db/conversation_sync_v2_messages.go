@@ -90,6 +90,73 @@ func (d *DataBase) AcceptConversationSyncV2State(ctx context.Context, epoch uint
 	return &accepted, nil
 }
 
+// AcceptConversationSyncV2States accepts a notification-state batch in one
+// transaction. The caller supplies the epoch captured before the network read;
+// any stale member aborts the whole batch so no partial state is published.
+func (d *DataBase) AcceptConversationSyncV2States(ctx context.Context, states []*model_struct.LocalConversationSyncV2Stream) (map[string]*model_struct.LocalConversationSyncV2Stream, error) {
+	accepted := make(map[string]*model_struct.LocalConversationSyncV2Stream, len(states))
+	if len(states) == 0 {
+		return accepted, nil
+	}
+	d.mRWMutex.Lock()
+	defer d.mRWMutex.Unlock()
+	err := d.conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		ids := make([]string, 0, len(states))
+		for _, state := range states {
+			if state == nil || state.ConversationID == "" || state.StateToken == "" || !state.Notifications {
+				return fmt.Errorf("sync v2: invalid notification state batch")
+			}
+			ids = append(ids, state.ConversationID)
+		}
+		var currentRows []model_struct.LocalConversationSyncV2Stream
+		if err := tx.Where("conversation_id IN ?", ids).Find(&currentRows).Error; err != nil {
+			return err
+		}
+		currentByID := make(map[string]model_struct.LocalConversationSyncV2Stream, len(currentRows))
+		for _, row := range currentRows {
+			currentByID[row.ConversationID] = row
+		}
+		var legacyRows []model_struct.NotificationSeqs
+		if err := tx.Where("conversation_id IN ?", ids).Find(&legacyRows).Error; err != nil {
+			return err
+		}
+		legacyByID := make(map[string]int64, len(legacyRows))
+		for _, row := range legacyRows {
+			legacyByID[row.ConversationID] = row.Seq
+		}
+		rows := make([]*model_struct.LocalConversationSyncV2Stream, 0, len(states))
+		for _, state := range states {
+			current := currentByID[state.ConversationID]
+			if current.Epoch != state.Epoch {
+				return fmt.Errorf("%w: stale state response", sdkerrs.ErrSyncV2StateChanged)
+			}
+			next := *state
+			next.ScannedSeq = current.ScannedSeq
+			next.Initialized = true
+			if !current.Initialized {
+				next.ScannedSeq = max(next.ScannedSeq, legacyByID[state.ConversationID])
+			}
+			next.PendingSeqs = nil
+			for _, seq := range current.PendingSeqs {
+				if seq >= max(int64(1), state.MinSeq) && (state.PermissionMaxSeq == 0 || seq <= state.PermissionMaxSeq) {
+					next.PendingSeqs = append(next.PendingSeqs, seq)
+				}
+			}
+			next.Epoch = current.Epoch + 1
+			if next.PermissionMaxSeq > 0 {
+				next.ScannedSeq = min(next.ScannedSeq, next.PermissionMaxSeq)
+			}
+			rows = append(rows, &next)
+			accepted[next.ConversationID] = &next
+		}
+		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&rows).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return accepted, nil
+}
+
 func conversationSyncV2Epochs(tx *gorm.DB, ids []string) (map[string]uint64, error) {
 	epochs := make(map[string]uint64, len(ids))
 	for _, id := range ids {

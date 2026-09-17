@@ -67,8 +67,10 @@ func (c *Conversation) processConversationSyncV2Push(ctx context.Context, push *
 
 func (c *Conversation) processConversationSyncV2PushRound(ctx context.Context, push *sdkws.PushMessages, ephemeral bool, newChats map[string]map[string]bool) error {
 	runtime := c.syncV2
-	runtime.runMu.Lock()
-	defer runtime.runMu.Unlock()
+	if err := runtime.acquireRun(ctx); err != nil {
+		return err
+	}
+	defer runtime.releaseRun()
 	runtime.capsMu.RLock()
 	caps := runtime.caps
 	runtime.capsMu.RUnlock()

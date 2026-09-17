@@ -15,6 +15,7 @@ import (
 )
 
 func (c *Conversation) activateConversationSyncV2(ctx context.Context, id string) (*model_struct.LocalConversation, error) {
+	ctx = syncv2.WithForegroundRead(ctx)
 	for attempt := 0; ; attempt++ {
 		result, err := c.activateConversationSyncV2Once(ctx, id)
 		stateChanged := err != nil && (errors.Is(err, sdkerrs.ErrSyncV2StateChanged) || strings.Contains(err.Error(), "sync v2: local state changed")) && !strings.Contains(err.Error(), "newer local visibility action")
@@ -32,8 +33,10 @@ func (c *Conversation) activateConversationSyncV2(ctx context.Context, id string
 // Called outside the Conversation consumer: publishing awaits that queue.
 func (c *Conversation) activateConversationSyncV2Once(ctx context.Context, id string) (*model_struct.LocalConversation, error) {
 	runtime := c.syncV2
-	runtime.runMu.Lock()
-	defer runtime.runMu.Unlock()
+	if err := runtime.acquireRun(ctx); err != nil {
+		return nil, err
+	}
+	defer runtime.releaseRun()
 	// Detail activation and conversation-change notifications share the same
 	// local stream epochs. Serialize the network read/commit window so a burst
 	// of notification events cannot invalidate the response between those two

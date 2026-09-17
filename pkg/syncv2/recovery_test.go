@@ -60,9 +60,11 @@ func TestRecoveryRetriesWrappedConnectionReset(t *testing.T) {
 }
 
 func TestRecoveryRetriesHTTPTransportUnexpectedEOF(t *testing.T) {
-	transportError := &url.Error{Op: "Post", URL: "https://fixture.invalid/conversation/sync_capabilities", Err: io.ErrUnexpectedEOF}
-	if got := RecoveryFor(transportError); got != Retry {
-		t.Fatalf("HTTP transport EOF: got %v want Retry", got)
+	for _, cause := range []error{io.EOF, io.ErrUnexpectedEOF} {
+		transportError := &url.Error{Op: "Post", URL: "https://fixture.invalid/conversation/sync_capabilities", Err: cause}
+		if got := RecoveryFor(transportError); got != Retry {
+			t.Errorf("HTTP transport %v: got %v want Retry", cause, got)
+		}
 	}
 	for _, err := range []error{io.ErrUnexpectedEOF, io.EOF, errors.New("unexpected EOF")} {
 		if got := RecoveryFor(err); got != Stop {

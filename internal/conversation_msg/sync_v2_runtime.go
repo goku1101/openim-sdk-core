@@ -16,6 +16,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 	"github.com/openimsdk/tools/log"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -59,7 +60,9 @@ type conversationSyncV2Runtime struct {
 	status             atomic.Pointer[sdk_struct.ConversationSyncState]
 	capsMu             sync.RWMutex
 	caps               *pb.Capabilities
-	runMu              sync.Mutex
+	runGateOnce        sync.Once
+	runGate            *semaphore.Weighted
+	roundGate          *semaphore.Weighted
 	retryMu            sync.Mutex
 	retryDone          chan struct{}
 	retryWake          chan struct{}
@@ -67,6 +70,27 @@ type conversationSyncV2Runtime struct {
 	metadataPrevious   map[string]*model_struct.LocalConversation
 	metadataGeneration string
 }
+
+// Keep checkpoint-changing operations serialized, but allow an abandoned
+// caller to leave the queue without waiting for another operation's network.
+func (r *conversationSyncV2Runtime) acquireRun(ctx context.Context) error {
+	r.initializeRunGates()
+	started := time.Now()
+	err := r.runGate.Acquire(ctx, 1)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		log.ZInfo(ctx, "sync v2 coordinator wait", "waitMs", elapsed.Milliseconds(), "acquired", err == nil)
+	}
+	return err
+}
+
+func (r *conversationSyncV2Runtime) initializeRunGates() {
+	r.runGateOnce.Do(func() {
+		r.runGate = semaphore.NewWeighted(1)
+		r.roundGate = semaphore.NewWeighted(1)
+	})
+}
+
+func (r *conversationSyncV2Runtime) releaseRun() { r.runGate.Release(1) }
 
 // ConfigureConversationSyncV2 runs once per login before connection workers.
 // The JS database has no native V2 tables and retains its existing integration.
@@ -107,10 +131,22 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 	if runtime == nil {
 		return false, nil
 	}
-	runtime.runMu.Lock()
-	defer runtime.runMu.Unlock()
+	runtime.initializeRunGates()
+	if err := runtime.roundGate.Acquire(ctx, 1); err != nil {
+		return true, err
+	}
+	defer runtime.roundGate.Release(1)
+	if err := runtime.acquireRun(ctx); err != nil {
+		return true, err
+	}
+	runHeld := true
+	defer func() {
+		if runHeld {
+			runtime.releaseRun()
+		}
+	}()
 	completed := false
-	runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "syncing", Progress: 1})
+	runtime.status.Store(&sdk_struct.ConversationSyncState{UserID: c.loginUserID, Phase: "syncing", Progress: 1})
 	failState := func() {
 		state := c.GetConversationSyncState()
 		state.Phase = "failed"
@@ -125,6 +161,69 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 	if ccontext.Info(ctx).OperationID() == "" {
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 	}
+
+	ctx, diagnostics := syncv2.WithDiagnostics(ctx)
+	diagnosticCtx := ctx
+	ctx = common.WithSyncV2TaskTiming(ctx, func(wait, work time.Duration, failed bool) {
+		syncv2.RecordDiagnostic(diagnosticCtx, "consumer_queue", 0, wait, false)
+		syncv2.RecordDiagnostic(diagnosticCtx, "consumer_work", 0, work, failed)
+	})
+	diagnosticStart := time.Now()
+	diagnosticStop, diagnosticDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(diagnosticDone)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-diagnosticStop:
+				return
+			case <-ticker.C:
+				log.ZInfo(diagnosticCtx, "sync v2 diagnostic sample", "elapsedMs", time.Since(diagnosticStart).Milliseconds(), "counters", diagnostics.Snapshot())
+			}
+		}
+	}()
+	defer func() {
+		close(diagnosticStop)
+		<-diagnosticDone
+		log.ZInfo(diagnosticCtx, "sync v2 diagnostic summary", "elapsedMs", time.Since(diagnosticStart).Milliseconds(), "completed", completed, "canceled", ctx.Err() != nil, "counters", diagnostics.Snapshot())
+	}()
+	var detailMu sync.Mutex
+	stageStarted := time.Now()
+	lastDetail := syncv2.DetailProgress{Stage: "negotiating"}
+	logStage := func() {
+		syncv2.RecordDiagnostic(diagnosticCtx, "stage_"+lastDetail.Stage, 0, time.Since(stageStarted), false)
+		fields := []any{"stage", lastDetail.Stage, "elapsedMs", time.Since(stageStarted).Milliseconds(), "completed", lastDetail.Completed, "unit", lastDetail.Unit}
+		if lastDetail.Total != nil {
+			fields = append(fields, "total", *lastDetail.Total)
+		}
+		log.ZInfo(ctx, "sync v2 stage timing", fields...)
+	}
+	defer func() {
+		detailMu.Lock()
+		defer detailMu.Unlock()
+		logStage()
+		log.ZInfo(ctx, "sync v2 round ended", "completed", completed, "canceled", ctx.Err() != nil)
+	}()
+	ctx = syncv2.WithDetailProgress(ctx, func(detail syncv2.DetailProgress) {
+		detailMu.Lock()
+		defer detailMu.Unlock()
+		if detail.Stage != lastDetail.Stage {
+			logStage()
+			stageStarted = time.Now()
+		}
+		lastDetail = detail
+		state := c.GetConversationSyncState()
+		state.Detail = &sdk_struct.ConversationSyncDetail{Stage: detail.Stage, Completed: detail.Completed, Total: detail.Total, Unit: detail.Unit, CurrentGroupMembers: detail.CurrentGroupMembers}
+		runtime.status.Store(&state)
+	})
+	ctx = syncv2.WithStoredMessages(ctx, func(added int) {
+		detailMu.Lock()
+		defer detailMu.Unlock()
+		state := c.GetConversationSyncState()
+		state.StoredMessages += added
+		runtime.status.Store(&state)
+	})
 	started := false
 	lastProgress := 1
 	hooks := syncv2.CoordinatorHooks{
@@ -174,12 +273,23 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			return nil
 		},
 		PrepareRelated: func(ctx context.Context) error {
-			for _, run := range []func(context.Context) error{c.group.SyncAllJoinedGroupsAndMembersWithLock, c.relation.IncrSyncFriendsWithLock, c.user.SyncLoginUserInfoWithoutNotice, c.relation.SyncAllBlackListWithoutNotice} {
+			// Related directories do not own the conversation checkpoint. Keep
+			// one background round, but let explicit conversation work proceed.
+			runtime.releaseRun()
+			runHeld = false
+			var relatedErr error
+			for index, run := range []func(context.Context) error{c.group.SyncAllJoinedGroupsAndMembersWithLock, c.relation.IncrSyncFriendsWithLock, c.user.SyncLoginUserInfoWithoutNotice, c.relation.SyncAllBlackListWithoutNotice} {
+				syncv2.ReportDetailProgress(ctx, []string{"groups", "friends", "profile", "blacklist"}[index], "", 0, nil)
 				if err := run(ctx); err != nil {
-					return err
+					relatedErr = err
+					break
 				}
 			}
-			return nil
+			if err := runtime.acquireRun(ctx); err != nil {
+				return err
+			}
+			runHeld = true
+			return relatedErr
 		},
 		ReadMetadata:   c.getIncrementalConversationFromServer,
 		Commit:         c.ConsumeConversationSyncV2,
@@ -259,7 +369,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 }
 
 // Metadata handlers can execute within the conversation queue. Do not acquire
-// runMu here: the round may be waiting for that queue's consumption receipt.
+// the run gate here: the round may be waiting for that queue's consumption receipt.
 func (c *Conversation) refreshConversationSyncV2Metadata(ctx context.Context) error {
 	return c.refreshConversationSyncV2MetadataForIDs(ctx, nil)
 }
@@ -328,12 +438,18 @@ func (c *Conversation) publishConversationSyncV2(ctx context.Context, checkpoint
 }
 
 func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context, checkpoint *model_struct.LocalConversationSyncV2, progress func(int, int)) error {
-	return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
-		epochs, err := c.syncV2.store.GetConversationSyncV2Epochs(ctx, checkpoint.SelectedIDs)
-		if err != nil {
-			return err
-		}
-		for start := 0; start < len(checkpoint.SelectedIDs); start += 300 {
+	// Retain the original epochs across batches: yielding must not make an
+	// invalidated background projection appear current again.
+	var epochs map[string]uint64
+	for start := 0; start < len(checkpoint.SelectedIDs); start += 300 {
+		err := common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error {
+			if epochs == nil {
+				var err error
+				epochs, err = c.syncV2.store.GetConversationSyncV2Epochs(ctx, checkpoint.SelectedIDs)
+				if err != nil {
+					return err
+				}
+			}
 			conversations, err := c.db.GetMultipleConversationDB(ctx, checkpoint.SelectedIDs[start:min(start+300, len(checkpoint.SelectedIDs))])
 			if err != nil {
 				return err
@@ -362,7 +478,11 @@ func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context
 			if progress != nil {
 				progress(min(start+300, len(checkpoint.SelectedIDs)), len(checkpoint.SelectedIDs))
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }

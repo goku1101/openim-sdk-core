@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"sort"
+	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
@@ -21,6 +23,15 @@ type conversationSyncV2MessageStore interface {
 // ConsumeConversationSyncV2 serializes message writes with existing conversation
 // events. Its caller advances only after receiving the durable acknowledgement.
 func (c *Conversation) ConsumeConversationSyncV2(ctx context.Context, progress *model_struct.LocalConversationSyncV2Stream, messages []*sdkws.MsgData) error {
+	metricCtx := ctx
+	kind := "chat"
+	if progress != nil && progress.Notifications {
+		kind = "notification"
+	}
+	ctx = common.WithSyncV2TaskTiming(ctx, func(wait, work time.Duration, failed bool) {
+		syncv2.RecordDiagnostic(metricCtx, "queue_"+kind, 0, wait, false)
+		syncv2.RecordDiagnostic(metricCtx, "work_"+kind, len(messages), work, failed)
+	})
 	return common.RunConversationSyncV2(ctx, c.conversationEventQueue, func() error { return c.consumeConversationSyncV2(ctx, progress, messages) })
 }
 
@@ -51,7 +62,15 @@ func (c *Conversation) consumeConversationSyncV2(ctx context.Context, progress *
 		for _, message := range messages {
 			rows = append(rows, MsgDataToLocalChatLog(message))
 		}
-		return store.CommitConversationSyncV2Messages(ctx, progress.Epoch, progress, rows)
+		if err := store.CommitConversationSyncV2Messages(ctx, progress.Epoch, progress, rows); err != nil {
+			return err
+		}
+		ids := make([]string, len(rows))
+		for i, row := range rows {
+			ids[i] = row.ClientMsgID
+		}
+		syncv2.ReportStoredMessages(ctx, progress.ConversationID, ids)
+		return nil
 	}
 	ordered := append([]*sdkws.MsgData(nil), messages...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Seq < ordered[j].Seq })
@@ -61,7 +80,13 @@ func (c *Conversation) consumeConversationSyncV2(ctx context.Context, progress *
 			return err
 		}
 		if message.Status < constant.MsgStatusHasDeleted {
+			started := time.Now()
 			err = c.dispatchConversationSyncV2Notification(ctx, message)
+			kind := "consume_system_notification"
+			if message.ContentType == constant.BusinessNotification {
+				kind = "consume_business_notification"
+			}
+			syncv2.RecordDiagnostic(ctx, kind, 1, time.Since(started), err != nil)
 			if err != nil {
 				return err
 			}

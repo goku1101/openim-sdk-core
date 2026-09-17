@@ -8,12 +8,19 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/protocol/sdkws"
 	"testing"
 )
 
 func TestSyncV2ConsumerAcknowledgesDurableMessages(t *testing.T) {
-	ctx := context.Background()
+	reports := 0
+	ctx := syncv2.WithStoredMessages(context.Background(), func(added int) {
+		if added != 1 {
+			t.Errorf("incorrect committed count: %d", added)
+		}
+		reports++
+	})
 	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -35,9 +42,15 @@ func TestSyncV2ConsumerAcknowledgesDurableMessages(t *testing.T) {
 	if _, err := database.GetMessageBySeq(ctx, state.ConversationID, 1); err == nil {
 		t.Fatal("message written outside serial queue")
 	}
+	if reports != 0 {
+		t.Fatal("reported before transaction")
+	}
 	conversation.Work(cmd)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if reports != 1 {
+		t.Fatal("committed message not reported")
 	}
 	message, err := database.GetMessageBySeq(ctx, state.ConversationID, 1)
 	if err != nil || message.Content != `{"content":"hello"}` || message.Status != constant.MsgStatusSendSuccess {

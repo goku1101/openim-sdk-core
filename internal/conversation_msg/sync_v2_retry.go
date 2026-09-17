@@ -98,8 +98,10 @@ func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *mode
 		}
 		return err
 	}
-	r.runMu.Lock()
-	defer r.runMu.Unlock()
+	if err := r.acquireRun(ctx); err != nil {
+		return err
+	}
+	defer r.releaseRun()
 	if job.Kind != "reconcile" && job.Kind != "state" {
 		return fmt.Errorf("sync v2: unsupported retry task")
 	}

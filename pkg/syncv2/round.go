@@ -83,6 +83,7 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	if err := store.SaveConversationSyncV2(ctx, checkpoint); err != nil {
 		return nil, err
 	}
+	ReportDetailProgress(ctx, "snapshot", "", 0, nil)
 	selection, err := c.ReadSnapshot(ctx, op, userID, min(caps.MaxPageSize, 500))
 	if err != nil {
 		return nil, err
@@ -113,18 +114,19 @@ func (c *Client) prepareRoundWithCapabilities(ctx context.Context, op, userID st
 	if progress != nil {
 		progress(2)
 	}
-	stateContext := func(start, end int) context.Context {
+	stateContext := func(stage, unit string, start, end int) context.Context {
 		return withStateProgress(ctx, func(done, total int) {
+			reportCount(ctx, stage, unit, done, total)
 			if progress != nil && total > 0 {
 				progress(start + (end-start)*done/total)
 			}
 		})
 	}
-	chat, err := c.StatesBatched(stateContext(2, 6), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.ChatIDs, IncludeDetails: true}, caps)
+	chat, err := c.StatesBatched(stateContext("details", "conversations", 2, 6), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.ChatIDs, IncludeDetails: true}, caps)
 	if err != nil {
 		return nil, err
 	}
-	notifications, err := c.StatesBatched(stateContext(6, 9), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.NotificationIDs, Notifications: true, IncludeSelf: selection.IncludeSelf}, caps)
+	notifications, err := c.StatesBatched(stateContext("notification_states", "streams", 6, 9), op, &pb.StateRequest{UserID: userID, ConversationIDs: selection.NotificationIDs, Notifications: true, IncludeSelf: selection.IncludeSelf}, caps)
 	if err != nil {
 		return nil, err
 	}
