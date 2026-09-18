@@ -1,6 +1,7 @@
 package open_im_sdk
 
 import (
+	"context"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
 	"sync"
 )
@@ -8,6 +9,7 @@ import (
 // Keep the handle retained by the connection manager and API error callback
 // stable when a new native bridge instance reinitializes an existing SDK.
 type connectionListenerProxy struct {
+	ctx      context.Context
 	mu       sync.RWMutex
 	listener open_im_sdk_callback.OnConnListener
 }
@@ -19,6 +21,9 @@ func (p *connectionListenerProxy) replace(listener open_im_sdk_callback.OnConnLi
 }
 
 func (p *connectionListenerProxy) current() open_im_sdk_callback.OnConnListener {
+	if p.ctx != nil && p.ctx.Err() != nil {
+		return nil
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.listener

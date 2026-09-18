@@ -89,6 +89,8 @@ func CheckResourceLoad(uSDK *LoginMgr, funcName string) error {
 }
 
 type LoginMgr struct {
+	callMu       sync.Mutex
+	calls        *sessionCalls
 	relation     *relation.Relation
 	group        *group.Group
 	conversation *conv.Conversation
@@ -97,6 +99,7 @@ type LoginMgr struct {
 
 	db           db_interface.DataBase
 	longConnMgr  *interaction.LongConnMgr
+	syncWorkers  sync.WaitGroup
 	msgSyncer    *interaction.MsgSyncer
 	third        *third.Third
 	token        string
@@ -168,7 +171,11 @@ func (u *LoginMgr) MsgKvListener() open_im_sdk_callback.OnMessageKvInfoListener 
 
 func (u *LoginMgr) Exit() {
 	u.cancel()
+	u.longConnMgr.WaitStopped()
+	u.calls.stopAndWait()
+	u.syncWorkers.Wait()
 	u.conversation.WaitConversationSyncV2Retries()
+	u.conversation.WaitBackgroundTasks()
 }
 
 func (u *LoginMgr) GetToken() string {
@@ -395,13 +402,23 @@ func setListener[T any](ctx context.Context, listener *T, getter func() T, setFu
 	if *(*unsafe.Pointer)(unsafe.Pointer(listener)) == nil && newFunc != nil {
 		*listener = newFunc(ctx)
 	}
-	setFunc(getter)
+	setFunc(func() T {
+		if ctx.Err() != nil {
+			if newFunc != nil {
+				return newFunc(ctx)
+			}
+			var empty T
+			return empty
+		}
+		return getter()
+	})
 }
 
 func (u *LoginMgr) run(ctx context.Context) {
 	u.longConnMgr.Run(ctx)
-	go u.msgSyncer.DoListener(ctx)
-	go common.DoListener(u.ctx, u.conversation)
+	u.syncWorkers.Add(2)
+	go func() { defer u.syncWorkers.Done(); u.msgSyncer.DoListener(ctx) }()
+	go func() { defer u.syncWorkers.Done(); common.DoListener(ctx, u.conversation) }()
 	go u.logoutListener(ctx)
 }
 
@@ -422,7 +439,10 @@ func (u *LoginMgr) Context() context.Context {
 
 func (u *LoginMgr) initResources() {
 	ctx := ccontext.WithInfo(context.Background(), u.info)
+	u.callMu.Lock()
 	u.ctx, u.cancel = context.WithCancel(ctx)
+	u.calls = &sessionCalls{}
+	u.callMu.Unlock()
 	var convChanLen int
 	if flagconst.TestMode {
 		convChanLen = 100000
@@ -433,8 +453,9 @@ func (u *LoginMgr) initResources() {
 	u.msgSyncerCh = make(chan common.Cmd2Value, 1000)
 	u.loginMgrCh = make(chan common.Cmd2Value, 1)
 	u.appBackground.reset()
-	u.longConnMgr = interaction.NewLongConnMgr(u.ctx, u.connListener, u.userOnlineStatusChange, u.msgSyncerCh, u.loginMgrCh)
-	u.ctx = ccontext.WithApiErrCode(u.ctx, &apiErrCallback{loginMgrCh: u.loginMgrCh, listener: u.connListener})
+	sessionListener := &connectionListenerProxy{ctx: u.ctx, listener: u.connListener}
+	u.longConnMgr = interaction.NewLongConnMgr(u.ctx, sessionListener, u.userOnlineStatusChange, u.msgSyncerCh, u.loginMgrCh)
+	u.ctx = ccontext.WithApiErrCode(u.ctx, &apiErrCallback{loginMgrCh: u.loginMgrCh, listener: sessionListener})
 	u.setLoginStatus(LogoutStatus)
 }
 

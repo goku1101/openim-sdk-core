@@ -79,7 +79,7 @@ func (c *Conversation) syncFlag(c2v common.Cmd2Value) {
 			c.group.SyncAllJoinedGroupsAndMembers,
 			c.relation.IncrSyncFriends,
 		}
-		runSyncFunctions(ctx, asyncWaitFunctions, asyncWait)
+		c.runSyncFunctions(ctx, asyncWaitFunctions, asyncWait)
 		c.addInitProgress(InitSyncProgress * 4 / 10)              // add 40% of InitSyncProgress as progress
 		c.ConversationListener().OnSyncServerProgress(c.progress) // notify server current Progress
 
@@ -87,7 +87,7 @@ func (c *Conversation) syncFlag(c2v common.Cmd2Value) {
 			c.IncrSyncConversations,
 			c.SyncAllConversationHashReadSeqs,
 		}
-		runSyncFunctions(ctx, syncWaitFunctions, syncWait)
+		c.runSyncFunctions(ctx, syncWaitFunctions, syncWait)
 		log.ZWarn(ctx, "core data sync over", nil, "cost time", time.Since(c.startTime).String())
 		c.addInitProgress(InitSyncProgress * 6 / 10)              // add 60% of InitSyncProgress as progress
 		c.ConversationListener().OnSyncServerProgress(c.progress) // notify server current Progress
@@ -96,7 +96,7 @@ func (c *Conversation) syncFlag(c2v common.Cmd2Value) {
 			c.user.SyncLoginUserInfoWithoutNotice,
 			c.relation.SyncAllBlackListWithoutNotice,
 		}
-		runSyncFunctions(ctx, asyncNoWaitFunctions, asyncNoWait)
+		c.runSyncFunctions(ctx, asyncNoWaitFunctions, asyncNoWait)
 
 	case constant.AppDataSyncFinish:
 		log.ZDebug(ctx, "AppDataSyncFinish", "time", time.Since(c.startTime).String())
@@ -432,7 +432,7 @@ func (c *Conversation) syncData(c2v common.Cmd2Value) {
 		c.SyncAllConversationHashReadSeqs,
 	}
 
-	runSyncFunctions(ctx, syncFuncs, syncWait)
+	c.runSyncFunctions(ctx, syncFuncs, syncWait)
 
 	// Asynchronous sync functions
 	asyncFuncs := []func(c context.Context) error{
@@ -443,10 +443,10 @@ func (c *Conversation) syncData(c2v common.Cmd2Value) {
 		c.IncrSyncConversationsWithLock,
 	}
 
-	runSyncFunctions(ctx, asyncFuncs, asyncNoWait)
+	c.runSyncFunctions(ctx, asyncFuncs, asyncNoWait)
 }
 
-func runSyncFunctions(ctx context.Context, funcs []func(c context.Context) error, mode int) {
+func (c *Conversation) runSyncFunctions(ctx context.Context, funcs []func(c context.Context) error, mode int) {
 	var wg sync.WaitGroup
 
 	for _, fn := range funcs {
@@ -455,7 +455,7 @@ func runSyncFunctions(ctx context.Context, funcs []func(c context.Context) error
 			wg.Add(1)
 			go executeSyncFunction(ctx, fn, &wg)
 		case asyncNoWait:
-			go executeSyncFunction(ctx, fn, nil)
+			c.backgroundTasks.start(ctx, func() { executeSyncFunction(ctx, fn, nil) })
 		case syncWait:
 			executeSyncFunction(ctx, fn, nil)
 		}

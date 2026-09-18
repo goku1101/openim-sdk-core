@@ -80,6 +80,7 @@ var (
 )
 
 type LongConnMgr struct {
+	workers          sync.WaitGroup
 	syncRequestGuard func(context.Context, int) error
 	//conn status mutex
 	w          sync.Mutex
@@ -159,9 +160,19 @@ func (c *LongConnMgr) RegisterSendOrder(lane ccontext.SendOrderLane, seq int64, 
 }
 
 func (c *LongConnMgr) Run(ctx context.Context) {
-	go c.readPump(ctx)
-	go c.writePump(ctx)
-	go c.heartbeat(ctx)
+	c.workers.Add(3)
+	go func() { defer c.workers.Done(); c.readPump(ctx) }()
+	go func() { defer c.workers.Done(); c.writePump(ctx) }()
+	go func() { defer c.workers.Done(); c.heartbeat(ctx) }()
+}
+
+// WaitStopped is called only after the owning session has been cancelled.
+func (c *LongConnMgr) WaitStopped() {
+	if c == nil {
+		return
+	}
+	c.workers.Wait()
+	c.mb.Close()
 }
 
 // SetSyncRequestGuard must be configured before Run. The V2 coordinator uses
@@ -191,7 +202,11 @@ func (c *LongConnMgr) SendReqWaitResp(ctx context.Context, m proto.Message, reqI
 		Resp:  make(chan *GeneralWsResp, 1),
 		Order: orderInfo,
 	}
-	c.send <- msg
+	select {
+	case <-ctx.Done():
+		return sdkerrs.ErrCtxDeadline
+	case c.send <- msg:
+	}
 	log.ZDebug(ctx, "send message to send channel success", "msg", m, "reqIdentifier", reqIdentifier)
 	select {
 	case <-ctx.Done():
@@ -247,7 +262,11 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		}
 		if err != nil {
 			log.ZWarn(c.ctx, "reConn", err)
-			time.Sleep(c.reconnectStrategy.GetSleepInterval())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(c.reconnectStrategy.GetSleepInterval()):
+			}
 			continue
 		}
 		c.conn.SetReadLimit(maxMessageSize)
@@ -295,7 +314,7 @@ func (c *LongConnMgr) writePump(ctx context.Context) {
 
 	defer func() {
 		c.close()
-		close(c.send)
+		// Producers stop through their session context; closing this channel races in-flight sends.
 	}()
 	textLane := newLaneState(ccontext.SendOrderLaneText)
 	mediaLane := newLaneState(ccontext.SendOrderLaneMedia)

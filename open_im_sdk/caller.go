@@ -88,16 +88,22 @@ func setNumeric(in interface{}, out interface{}) {
 }
 
 func call_(operationID string, fn any, args ...any) (res any, err error) {
+	ctx, done, err := captureSDKCall(fn)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	return callWithContext(ctx, operationID, fn, args...)
+}
+
+func callWithContext(sessionCtx context.Context, operationID string, fn any, args ...any) (res any, err error) {
 	t := time.Now()
 	funcPtr := reflect.ValueOf(fn).Pointer()
 	funcName := runtime.FuncForPC(funcPtr).Name()
 	if operationID == "" {
 		return nil, sdkerrs.ErrArgs.WrapMsg("call function operationID is empty")
 	}
-	if err := CheckResourceLoad(UserForSDK, funcName); err != nil {
-		return nil, sdkerrs.ErrResourceLoad.WrapMsg("not load resource")
-	}
-	ctx := ccontext.WithOperationID(UserForSDK.Context(), operationID)
+	ctx := ccontext.WithOperationID(sessionCtx, operationID)
 
 	defer func(start time.Time) {
 		if r := recover(); r != nil {
@@ -218,8 +224,14 @@ func call(callback open_im_sdk_callback.Base, operationID string, fn any, args .
 		log.ZWarn(context.Background(), "callback is nil", nil)
 		return
 	}
+	ctx, done, captureErr := captureSDKCall(fn)
 	go func() {
-		res, err := call_(operationID, fn, args...)
+		var res any
+		err := captureErr
+		if err == nil {
+			defer done()
+			res, err = callWithContext(ctx, operationID, fn, args...)
+		}
 		if err != nil {
 			var code errs.CodeError
 			if errors.As(err, &code) {
@@ -242,6 +254,11 @@ func call(callback open_im_sdk_callback.Base, operationID string, fn any, args .
 }
 
 func syncCall(operationID string, fn any, args ...any) (res string) {
+	sessionCtx, done, captureErr := captureSDKCall(fn)
+	if captureErr != nil {
+		return ""
+	}
+	defer done()
 	err := error(nil)
 	if operationID == "" {
 		return ""
@@ -264,7 +281,7 @@ func syncCall(operationID string, fn any, args ...any) (res string) {
 	}
 	ins := make([]reflect.Value, 0, numIn)
 
-	ctx := ccontext.WithOperationID(UserForSDK.Context(), operationID)
+	ctx := ccontext.WithOperationID(sessionCtx, operationID)
 	t := time.Now()
 	defer func(start time.Time) {
 		if r := recover(); r != nil {
@@ -369,6 +386,12 @@ func messageCall(callback open_im_sdk_callback.SendMsgCallBack, operationID stri
 	messageCall_(callback, operationID, fn, args...)
 }
 func messageCall_(callback open_im_sdk_callback.SendMsgCallBack, operationID string, fn any, args ...any) {
+	sessionCtx, done, captureErr := captureSDKCall(fn)
+	if captureErr != nil {
+		callback.OnError(sdkerrs.ResourceLoadNotCompleteError, captureErr.Error())
+		return
+	}
+	defer done()
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println(" panic err:", r, string(debug.Stack()))
@@ -398,7 +421,7 @@ func messageCall_(callback open_im_sdk_callback.SendMsgCallBack, operationID str
 
 	t := time.Now()
 	ins := make([]reflect.Value, 0, numIn)
-	ctx := ccontext.WithOperationID(UserForSDK.Context(), operationID)
+	ctx := ccontext.WithOperationID(sessionCtx, operationID)
 	ctx = ccontext.WithSendMessageCallback(ctx, callback)
 	funcPtr := reflect.ValueOf(fn).Pointer()
 	funcName := runtime.FuncForPC(funcPtr).Name()

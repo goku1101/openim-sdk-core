@@ -1,6 +1,7 @@
 package open_im_sdk
 
 import (
+	"context"
 	"fmt"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 	"reflect"
@@ -101,4 +102,36 @@ func TestConnectionListenerConcurrentRebind(t *testing.T) {
 	if len(first.calls)+len(second.calls) != 1000 {
 		t.Fatal("lost callbacks")
 	}
+}
+
+func TestCancelledSessionDoesNotDeliverToReboundConnectionListener(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	oldListener, newListener := &recordingConnectionListener{}, &recordingConnectionListener{}
+	bridge := &connectionListenerProxy{listener: oldListener}
+	session := &connectionListenerProxy{ctx: ctx, listener: bridge}
+	session.OnConnectSuccess()
+	cancel()
+	bridge.replace(newListener)
+	session.OnKickedOffline()
+	session.OnConnectSuccess()
+	session.OnUserTokenExpired()
+	if len(oldListener.calls) != 1 || len(newListener.calls) != 0 {
+		t.Fatal("stale connection callbacks escaped session")
+	}
+}
+
+func TestExitWaitsForSessionWorkers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr := &LoginMgr{ctx: ctx, cancel: cancel}
+	mgr.syncWorkers.Add(1)
+	stopped := make(chan struct{})
+	go func() { mgr.Exit(); close(stopped) }()
+	<-ctx.Done()
+	select {
+	case <-stopped:
+		t.Fatal("exit returned with active database worker")
+	default:
+	}
+	mgr.syncWorkers.Done()
+	<-stopped
 }

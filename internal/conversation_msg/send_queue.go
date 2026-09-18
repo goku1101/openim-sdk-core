@@ -42,6 +42,8 @@ type messageSender struct {
 	conversation *Conversation
 	queue        chan *sendTask
 	wg           sync.WaitGroup
+	mu           sync.Mutex
+	stopped      bool
 
 	textSeq  atomic.Int64
 	mediaSeq atomic.Int64
@@ -67,17 +69,48 @@ func newMessageSender(conversation *Conversation) *messageSender {
 }
 
 func (m *messageSender) submit(task *sendTask) error {
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return context.Canceled
+	}
+	if err := task.ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	task.enqueueAt = time.Now()
 	m.decorate(task)
+	m.mu.Unlock()
 	for i := 0; i < maxSendEnqueueRetry; i++ {
+		m.mu.Lock()
+		if m.stopped {
+			m.mu.Unlock()
+			return context.Canceled
+		}
 		select {
 		case m.queue <- task:
+			m.mu.Unlock()
 			return nil
 		default:
-			time.Sleep(sendEnqueueRetryInterval)
+			m.mu.Unlock()
+		}
+		select {
+		case <-task.ctx.Done():
+			return task.ctx.Err()
+		case <-time.After(sendEnqueueRetryInterval):
 		}
 	}
 	return errs.New("send task queue full").Wrap()
+}
+
+func (m *messageSender) stopAndWait() {
+	m.mu.Lock()
+	if !m.stopped {
+		m.stopped = true
+		close(m.queue)
+	}
+	m.mu.Unlock()
+	m.wg.Wait()
 }
 
 func (m *messageSender) decorate(task *sendTask) {
@@ -125,9 +158,22 @@ func (m *messageSender) worker() {
 }
 
 func (m *messageSender) runTask(task *sendTask) {
+	m.mu.Lock()
+	stopped := m.stopped
+	m.mu.Unlock()
+	if stopped {
+		notifySendError(task.ctx, context.Canceled)
+		return
+	}
+	if err := task.ctx.Err(); err != nil {
+		notifySendError(task.ctx, err)
+		return
+	}
 	msg, err := task.exec(task.ctx)
 	if task.lane == ccontext.SendOrderLaneMedia && task.mediaSize > 0 && err == nil && task.ordered {
+		m.mu.Lock()
 		m.estimator.Update(task.mediaSize, time.Since(task.enqueueAt))
+		m.mu.Unlock()
 	}
 	if err != nil {
 		notifySendError(task.ctx, err)

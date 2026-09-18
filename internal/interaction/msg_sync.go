@@ -59,6 +59,7 @@ type MsgSyncer struct {
 	reinstalled            bool                  //true if the app was uninstalled and reinstalled
 	isSyncing              bool                  // indicates whether data is being synced
 	isSyncingLock          sync.Mutex            // lock for syncing state
+	v2Workers              sync.WaitGroup
 	v2BackgroundDone       <-chan bool
 	conversationSyncV2     func(context.Context, bool) (bool, error)
 	conversationSyncV2Push func(context.Context, *sdkws.PushMessages) (bool, error)
@@ -94,7 +95,9 @@ func (m *MsgSyncer) tryConversationSyncV2(ctx context.Context) bool {
 	done := make(chan bool, 1)
 	reinstalled := m.reinstalled
 	failed := false
+	m.v2Workers.Add(1)
 	go func() {
+		defer m.v2Workers.Done()
 		handled, err := m.conversationSyncV2(runContext, reinstalled)
 		if err != nil {
 			log.ZWarn(ctx, "conversation sync V2 failed", err)
@@ -259,6 +262,7 @@ func (m *MsgSyncer) loadSeq(ctx context.Context) error {
 // DoListener Listen to the message pipe of the message synchronizer
 // and process received and pushed messages
 func (m *MsgSyncer) DoListener(ctx context.Context) {
+	defer m.v2Workers.Wait()
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Sprintf("panic: %+v\n%s", r, debug.Stack())
@@ -267,6 +271,9 @@ func (m *MsgSyncer) DoListener(ctx context.Context) {
 		}
 	}()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case cmd := <-m.recvCh:
 			m.handlePushMsgAndEvent(cmd)

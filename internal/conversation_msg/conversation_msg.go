@@ -77,6 +77,7 @@ type Conversation struct {
 	sender                 *messageSender
 	senderOnce             sync.Once
 	duplicateMessageRepair sync.Map
+	backgroundTasks        conversationTasks
 }
 
 func (c *Conversation) ConversationEventQueue() chan common.Cmd2Value {

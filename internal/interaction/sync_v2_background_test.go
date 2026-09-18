@@ -38,3 +38,34 @@ func TestPriorityReadyReleasesListenerBeforeBackgroundFinishes(t *testing.T) {
 		t.Fatal("duplicate round fell back to legacy")
 	}
 }
+
+func TestListenerCancellationWaitsForBackgroundSync(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tail := make(chan struct{})
+	m := &MsgSyncer{ctx: ctx, recvCh: make(chan common.Cmd2Value)}
+	m.SetConversationSyncV2(func(ctx context.Context, _ bool) (bool, error) {
+		common.NotifySyncV2Background(ctx)
+		<-ctx.Done()
+		<-tail
+		return true, nil
+	})
+	if !m.tryConversationSyncV2(ctx) {
+		t.Fatal("unexpected legacy")
+	}
+	stopped := make(chan struct{})
+	go func() { m.DoListener(ctx); close(stopped) }()
+	cancel()
+	select {
+	case <-stopped:
+		close(tail)
+		t.Fatal("listener exited before database worker stopped")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(tail)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("listener did not exit after worker stopped")
+	}
+}

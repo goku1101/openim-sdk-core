@@ -947,11 +947,13 @@ func (c *Conversation) asyncRepairDuplicateMessages(ctx context.Context, convers
 		log.ZDebug(ctx, "duplicate message repair already running", "conversationID", conversationID)
 		return
 	}
-	repairCtx := context.WithoutCancel(ctx)
-	go func() {
+	repairCtx := ctx
+	if !c.backgroundTasks.start(repairCtx, func() {
 		defer c.duplicateMessageRepair.Delete(conversationID)
 		if err := c.db.CleanDuplicateInvalidMessages(repairCtx, conversationID); err != nil {
 			log.ZWarn(repairCtx, "CleanDuplicateInvalidMessages failed", err, "conversationID", conversationID)
 		}
-	}()
+	}) {
+		c.duplicateMessageRepair.Delete(conversationID)
+	}
 }
