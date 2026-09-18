@@ -23,9 +23,10 @@ import (
 const PolicyVersion = "conversation-sync-v2.2"
 const maxRequestBytes = 64 * 1024
 
-// Chat batches have a separately negotiated envelope budget. Keep a local
-// safety ceiling while allowing the server's SyncV2 limits to be used.
-const maxChatRequestBytes = 4 * 1024 * 1024
+// Chat batches have a separately negotiated envelope budget. Keep an
+// emergency ceiling above the current server contract while allowing the
+// negotiated SyncV2 limit to control normal operation.
+const maxChatRequestBytes = 8 * 1024 * 1024
 
 type requestBudgetKey struct{}
 

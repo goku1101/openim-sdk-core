@@ -21,10 +21,12 @@ type chatPull struct {
 type responseBudgetKey struct{}
 
 const (
-	// These are local safety ceilings. The effective values remain the
-	// negotiated server capabilities when they are lower.
-	maxChatBatchStreams = 50
-	maxChatBatchSeqs    = 200
+	// These are emergency local ceilings, deliberately above the current
+	// server contract. Normal operation follows the negotiated capabilities;
+	// these only protect the client from an invalid or unexpectedly huge value.
+	maxChatBatchStreams = 128
+	maxChatBatchSeqs    = 4096
+	maxChatPageSeqs     = 4096
 )
 
 func chatBatchEnabled(caps *pb.Capabilities) bool {
@@ -37,7 +39,7 @@ func validateChatLimits(caps *pb.Capabilities) error {
 	return nil
 }
 func chatPageSize(caps *pb.Capabilities) int {
-	return min(int(caps.MaxBatchSize), int(caps.MaxChatMessagePullSeqsPerStream), int(caps.MaxChatMessagePullSeqs), 100)
+	return min(int(caps.MaxBatchSize), int(caps.MaxChatMessagePullSeqsPerStream), int(caps.MaxChatMessagePullSeqs), maxChatPageSeqs)
 }
 func chatItem(q *pb.PullRequest) *pb.ChatBatchPullItem {
 	identity, _ := json.Marshal(q)
