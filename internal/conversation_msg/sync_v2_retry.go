@@ -78,7 +78,8 @@ func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *mode
 	if r.mode.Load() == syncV2Legacy {
 		return fmt.Errorf("sync v2: retry paused in legacy session")
 	}
-	if c.GetConversationSyncState().Phase != "ready" {
+	state := c.GetConversationSyncState()
+	if state.Phase != "ready" && !(job.Kind == "push" && state.Phase == "syncing" && state.PriorityReady) {
 		return syncv2.ErrStatePending
 	}
 	if job.Kind == "push" {

@@ -25,6 +25,14 @@ import (
 )
 
 func TestSyncV2DurablePushSurvivesRestartWithoutReplayingTransientNotification(t *testing.T) {
+	testDurablePushRestart(t, "ready")
+}
+
+func TestSyncV2DurablePushRetriesDuringPriorityReadyBackground(t *testing.T) {
+	testDurablePushRestart(t, "syncing")
+}
+
+func testDurablePushRestart(t *testing.T, phase string) {
 	var known atomic.Bool
 	var reads atomic.Int32
 	var deniedReads atomic.Int32
@@ -87,7 +95,7 @@ func TestSyncV2DurablePushSurvivesRestartWithoutReplayingTransientNotification(t
 		c.ConfigureConversationSyncV2(ctx)
 		c.syncV2.mode.Store(syncV2Enabled)
 		c.syncV2.caps = &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}
-		c.syncV2.status.Store(&sdk_struct.ConversationSyncState{Phase: "ready", Progress: 100})
+		c.syncV2.status.Store(&sdk_struct.ConversationSyncState{Phase: phase, Progress: 60, PriorityReady: true})
 		c.SetBusinessListener(func() open_im_sdk_callback.OnCustomBusinessListener {
 			return &syncV2PushBusinessListener{receive: func(value string) {
 				if value == "transient" {
