@@ -37,7 +37,22 @@ func (c *Conversation) GetAllConversationList(ctx context.Context) ([]*model_str
 }
 
 func (c *Conversation) GetConversationListSplit(ctx context.Context, offset, count int) ([]*model_struct.LocalConversation, error) {
-	return c.db.GetConversationListSplitDB(ctx, offset, count)
+	rows, err := c.db.GetConversationListSplitDB(ctx, offset, count)
+	if err != nil {
+		return nil, err
+	}
+	if c.syncV2 != nil && c.syncV2.mode.Load() == syncV2Enabled {
+		var missing []*model_struct.LocalConversation
+		for _, row := range rows {
+			if row.ShowName == "" && (row.ConversationType == constant.SingleChatType || row.ConversationType == constant.ReadGroupChatType || row.ConversationType == constant.NotificationChatType) {
+				missing = append(missing, row)
+			}
+		}
+		if err := c.batchAddFaceURLAndName(ctx, missing...); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
 }
 
 func (c *Conversation) HideConversation(ctx context.Context, conversationID string) error {

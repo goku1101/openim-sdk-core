@@ -211,9 +211,16 @@ func (d *DataBase) applyConversationSyncV2Details(ctx context.Context, expected,
 				}
 				columns["min_seq"], columns["max_seq"], columns["unread_count"] = state.MinSeq, state.MaxSeq, state.UnreadCount
 			}
+			// A confirmed metadata tail makes the directory pageable without pulling
+			// message bodies. Never replace an existing preview or reveal a hidden row.
+			previous := existing[id]
+			seedTail := state.Known && state.MaxSeq > 0 && state.LastMessageTime > 0 && !hidden[id] && previous.LatestMsgSendTime == 0 && previous.LatestMsg == ""
+			if seedTail {
+				columns["latest_msg_send_time"] = state.LastMessageTime
+			}
 			// Compare inside the transaction, after validating permission epochs.
 			// Unchanged cache rows need neither an UPDATE nor an UPSERT.
-			if previous, ok := existing[id]; ok && conversationSyncV2DetailsEqual(previous, state) {
+			if previous, ok := existing[id]; ok && !seedTail && conversationSyncV2DetailsEqual(previous, state) {
 				continue
 			}
 			updates := make([]string, 0, len(columns)-1)

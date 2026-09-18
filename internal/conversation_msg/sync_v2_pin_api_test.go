@@ -129,11 +129,11 @@ func testSetConversationPin(t *testing.T, conflicts int, hidden bool) {
 	}
 	defer database.Close(ctx)
 	for _, id := range []string{"sg_target", "sg_archive"} {
-		if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: id, ConversationType: 3, GroupID: id[3:], DraftText: "preserve draft", DraftTextTime: 99, LatestMsgSendTime: 88}); err != nil {
+		if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: id, ShowName: "Group", ConversationType: 3, GroupID: id[3:], DraftText: "preserve draft", DraftTextTime: 99, LatestMsgSendTime: 88}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "sg_loaded", ConversationType: 3, GroupID: "loaded", MinSeq: 1, MaxSeq: 2, UnreadCount: 4, DraftText: "unrelated"}); err != nil {
+	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "sg_loaded", ShowName: "Loaded", ConversationType: 3, GroupID: "loaded", MinSeq: 1, MaxSeq: 2, UnreadCount: 4, DraftText: "unrelated"}); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", SnapshotID: "s", Stage: "snapshot", VersionID: "v", Version: 1, SelectedIDs: []string{"sg_loaded"}}

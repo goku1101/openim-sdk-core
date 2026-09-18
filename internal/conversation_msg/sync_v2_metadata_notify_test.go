@@ -103,7 +103,7 @@ func testMetadataBoundaryNotification(t *testing.T, pending, conflict, newlyPinn
 		t.Fatal(err)
 	}
 	defer database.Close(ctx)
-	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "sg_target", ConversationType: 3, GroupID: "target", MinSeq: 6, MaxSeq: 6, LatestMsg: `{"clientMsgID":"old","seq":6}`, LatestMsgSendTime: 10, DraftText: "keep"}); err != nil {
+	if err = database.InsertConversation(ctx, &model_struct.LocalConversation{ConversationID: "sg_target", ShowName: "Target", ConversationType: 3, GroupID: "target", MinSeq: 6, MaxSeq: 6, LatestMsg: `{"clientMsgID":"old","seq":6}`, LatestMsgSendTime: 10, DraftText: "keep"}); err != nil {
 		t.Fatal(err)
 	}
 	if pending {

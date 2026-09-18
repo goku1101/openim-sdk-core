@@ -146,3 +146,43 @@ func testSyncV2InitialPage(t *testing.T, pending bool) {
 		t.Fatalf("preview not durably readable: %d %v", len(page), err)
 	}
 }
+
+func TestSyncV2DirectoryPageEnrichesOnlyRequestedMetadataRows(t *testing.T) {
+	ctx, cancel := context.WithCancel(ccontext.WithInfo(context.Background(), &ccontext.GlobalConfig{UserID: "u"}))
+	defer cancel()
+	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(ctx)
+	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", Stage: "details"}
+	response := &pb.StateResponse{}
+	for i := 0; i < 120; i++ {
+		id := fmt.Sprintf("si_%03d_u", i)
+		cp.SelectedIDs = append(cp.SelectedIDs, id)
+		response.States = append(response.States, &pb.State{ConversationID: id, Known: true, MinSeq: 1, MaxSeq: 1, LastMessageTime: int64(1000 + i), Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: id, ConversationType: 1, UserID: "peer"}})
+	}
+	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.ApplyConversationSyncV2Details(ctx, cp, response); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.InsertFriend(ctx, &model_struct.LocalFriend{OwnerUserID: "u", FriendUserID: "peer", Nickname: "Peer"}); err != nil {
+		t.Fatal(err)
+	}
+	queue := make(chan common.Cmd2Value, 10)
+	u := user.NewUser(database, "u", queue)
+	c := NewConversation(ctx, &interaction.LongConnMgr{}, database, queue, nil, relation.NewFriend("u", database, u, queue), group.NewGroup("u", database, queue), u, nil)
+	c.ConfigureConversationSyncV2(ctx)
+	c.syncV2.mode.Store(syncV2Enabled)
+	rows, err := c.GetConversationListSplit(ctx, 50, 50)
+	if err != nil || len(rows) != 50 {
+		t.Fatalf("second page unavailable: %d %v", len(rows), err)
+	}
+	for _, row := range rows {
+		if row.ShowName != "Peer" || row.LatestMsg != "" {
+			t.Fatalf("page required message history or lost display metadata: %+v", row)
+		}
+	}
+}
