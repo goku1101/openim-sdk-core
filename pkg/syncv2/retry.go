@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"math/rand"
 	"time"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
@@ -20,6 +21,18 @@ func retryDelay(attempts uint32) time.Duration {
 		return 5 * time.Minute
 	}
 	return min(time.Second<<attempts, 5*time.Minute)
+}
+
+// retryDelayWithJitter keeps durable retries from synchronizing after a
+// shared outage. The positive-only jitter preserves the existing minimum
+// retry delay while spreading tasks over a bounded 25% window.
+func retryDelayWithJitter(attempts uint32) time.Duration {
+	base := retryDelay(attempts)
+	if base >= 5*time.Minute {
+		return base
+	}
+	extra := rand.Int63n(int64(base)/4 + 1)
+	return base + time.Duration(extra)
 }
 
 // RunRetryTasks is a single, cancelable consumer. The owner wakes it after
@@ -80,7 +93,7 @@ func RunRetryTasks(ctx context.Context, store RetryStore, wake <-chan struct{}, 
 		} else {
 			due := int64(math.MaxInt64)
 			if errors.Is(err, ErrStatePending) || action == Retry || action == RefreshState || action == RebuildSnapshot || action == Renegotiate {
-				due = time.Now().Add(retryDelay(job.Attempts)).UnixMilli()
+				due = time.Now().Add(retryDelayWithJitter(job.Attempts)).UnixMilli()
 			}
 			err = store.RescheduleConversationSyncV2Retry(ctx, job, due)
 		}
