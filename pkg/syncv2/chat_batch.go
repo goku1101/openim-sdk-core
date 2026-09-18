@@ -181,7 +181,7 @@ func (c *Client) fetchChatBatch(ctx context.Context, op string, fs []*chatPull, 
 	budget := min(int64(caps.MaxChatMessageResponseBytes)*6+4096, int64(maxResponseBytes))
 	_, err := c.invoke(context.WithValue(ctx, responseBudgetKey{}, budget), op, "/msg/sync_chat_messages_batch_v2", req, resp)
 	if err != nil {
-		if RecoveryFor(err) == Retry {
+		if chatBatchRetryable(err) {
 			for _, f := range fs {
 				f.err = err
 			}
@@ -226,6 +226,23 @@ func (c *Client) fetchChatBatch(ctx context.Context, op string, fs []*chatPull, 
 		RecordDiagnostic(ctx, "fetched_chat", len(r.Messages), 0, false)
 	}
 	return nil
+}
+
+// A batch transport/HTTP failure must leave only this batch pending. It must
+// not renegotiate capability or fan out into one request per conversation.
+func chatBatchRetryable(err error) bool {
+	if RecoveryFor(err) == Retry {
+		return true
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrCode >= 500 && apiErr.ErrCode <= 599
+	}
+	return false
 }
 
 // Keep a split inside the same item. No partial cursor is committed until all

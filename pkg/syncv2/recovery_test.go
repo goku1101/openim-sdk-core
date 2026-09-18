@@ -20,6 +20,7 @@ func TestRecoveryRequiresMatchingCodeAndReason(t *testing.T) {
 		{8, "SYNC_V2_READ_BYTES_REDUCE_BATCH", ReduceBatch},
 		{8, "SYNC_V2_READ_CONCURRENCY", Retry},
 		{8, "SYNC_V2_SNAPSHOT_QUOTA", Retry},
+		{8, "SYNC_V2_CHAT_BATCH_BUSY", Retry},
 		{9, "SYNC_V2_SNAPSHOT_EXPIRED", RebuildSnapshot},
 		{9, "SYNC_V2_DIRECTORY_CHANGED", RebuildSnapshot},
 		{3, "SYNC_V2_INVALID_DIRECTORY_TOKEN", Stop},

@@ -114,6 +114,12 @@ func batchItemRetry(err error) bool {
 	if errors.Is(err, ErrStatePending) {
 		return true
 	}
+	// Chat-batch transport failures (including HTTP/API 5xx) are retryable at
+	// item scope. Keep successful siblings committed and let the durable
+	// recovery pass retry only the failed batch; never fail the whole sync round.
+	if chatBatchRetryable(err) {
+		return true
+	}
 	if action := RecoveryFor(err); action == Retry || action == RefreshState {
 		return true
 	}

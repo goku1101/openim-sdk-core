@@ -22,7 +22,7 @@ import (
 )
 
 func TestChatBatchIntegration(t *testing.T) {
-	for _, scenario := range []string{"combined", "mixed", "busy", "unsupported", "malformed", "disabled", "version", "item_split", "pages", "bytes", "timeout", "internal", "unavailable", "holes", "epoch"} {
+	for _, scenario := range []string{"combined", "mixed", "busy", "server_error", "unsupported", "malformed", "disabled", "version", "item_split", "pages", "bytes", "timeout", "internal", "unavailable", "holes", "epoch"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			d, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
@@ -78,6 +78,10 @@ func TestChatBatchIntegration(t *testing.T) {
 					batches.Add(1)
 					if scenario == "busy" {
 						w.WriteHeader(503)
+						return
+					}
+					if scenario == "server_error" {
+						json.NewEncoder(w).Encode(map[string]any{"errCode": 500, "errMsg": "ServerInternalError"})
 						return
 					}
 					if scenario == "unsupported" {
@@ -205,7 +209,7 @@ func TestChatBatchIntegration(t *testing.T) {
 				}
 				return
 			}
-			if scenario == "busy" {
+			if scenario == "busy" || scenario == "server_error" {
 				if singles.Load() != 0 || result.Completed != 0 || len(result.PendingIDs) != 10 {
 					t.Fatalf("busy lost pending: %+v", result)
 				}
