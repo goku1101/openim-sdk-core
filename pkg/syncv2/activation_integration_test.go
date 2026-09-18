@@ -198,3 +198,49 @@ func TestActivationRetriesAfterConcurrentStreamInvalidation(t *testing.T) {
 		t.Fatalf("retry did not preserve the invalidated stream epoch: %+v", stream)
 	}
 }
+
+func TestActivationPreservesUnrelatedCheckpointAdvancementDuringEveryRead(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(ctx)
+	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", Stage: "snapshot", VersionID: "v", SelectedIDs: []string{"other"}}
+	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	cp.Stage = "ready"
+	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		current, e := database.GetConversationSyncV2(ctx)
+		if e != nil {
+			t.Error(e)
+			w.WriteHeader(500)
+			return
+		}
+		next := *current
+		next.Stage = "messages"
+		next.Version++
+		if e = database.ApplyConversationSyncV2MetadataSubset(ctx, current, &next, &pb.StateResponse{}, nil, nil); e != nil {
+			t.Error(e)
+			w.WriteHeader(500)
+			return
+		}
+		state := &pb.State{ConversationID: "target", Known: true, StateToken: "fresh", MinSeq: 1, MaxSeq: 0, Conversation: &conversation.Conversation{OwnerUserID: "u", ConversationID: "target", UserID: "peer", ConversationType: 1}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.StateResponse{States: []*pb.State{state}}})
+	}))
+	defer server.Close()
+	client := syncv2.NewClient(server.URL, "", server.Client())
+	got, err := client.ActivateConversation(ctx, "op", "target", &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, database)
+	if err != nil {
+		t.Fatalf("unrelated background progress blocked activation: %v", err)
+	}
+	if calls.Load() != 1 || got.Version != 1 || got.Revision != 2 || !reflect.DeepEqual(got.SelectedIDs, model_struct.StringArray{"other", "target"}) {
+		t.Fatalf("incorrect checkpoint merge: calls=%d checkpoint=%+v", calls.Load(), got)
+	}
+}

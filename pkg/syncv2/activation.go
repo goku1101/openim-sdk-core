@@ -63,6 +63,17 @@ func (c *Client) activateConversationAttempt(ctx context.Context, op, id string,
 	if !state.Known || state.Conversation == nil {
 		return nil, ErrStatePending
 	}
+	// Background work can advance the directory checkpoint while this single
+	// chat is read. Preserve that newer progress, while the transaction still
+	// checks the original target stream epoch and the latest checkpoint CAS.
+	latest, err := store.GetConversationSyncV2(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if latest.UserID != before.UserID || latest.Generation != before.Generation || latest.SnapshotID != before.SnapshotID || latest.VersionID != before.VersionID || latest.Version < before.Version {
+		return nil, fmt.Errorf("%w: activation directory replaced", sdkerrs.ErrSyncV2StateChanged)
+	}
+	before = latest
 	if err = store.ActivateConversationSyncV2(ctx, before, epochs[id], state); err != nil {
 		return nil, err
 	}
