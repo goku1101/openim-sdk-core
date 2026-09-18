@@ -63,6 +63,8 @@ func (d *Diagnostics) Snapshot() map[string]DiagnosticCounter {
 
 func requestDiagnosticKind(req proto.Message) string {
 	switch r := req.(type) {
+	case *pb.ChatBatchPullRequest:
+		return "chat_batch_pull"
 	case *pb.BatchPullRequest:
 		return "notification_batch_pull"
 	case *pb.StateRequest:

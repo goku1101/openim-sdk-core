@@ -215,6 +215,10 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				return err
 			}
 			id := ids[index]
+			if f, ok := ctx.Value(chatPullKey{}).(*chatPull); ok && f.err == ErrStatePending {
+				outcomes[index] = pending
+				return nil
+			}
 			if unavailable[id] {
 				outcomes[index] = denied
 				return nil
@@ -245,7 +249,7 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 				outcomes[index] = denied
 				return nil
 			}
-			if errors.Is(err, ErrStatePending) {
+			if errors.Is(err, ErrStatePending) || (ctx.Value(chatPullKey{}) != nil && RecoveryFor(err) == RefreshState) {
 				outcomes[index] = pending
 				return nil
 			}
@@ -274,7 +278,11 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			}
 			advance()
 		}
-		if req.Notifications && len(accepted) > 0 {
+		if !req.Notifications && chatBatchEnabled(caps) {
+			if err := c.consumeChatsBatch(ctx, op, ids, queries, states, epochs, unchanged, caps, store, scan, publish); err != nil {
+				return err
+			}
+		} else if req.Notifications && len(accepted) > 0 {
 			if err := c.consumeNotificationsPrefetched(ctx, op, ids, queries, states, accepted, caps, store, scan, publish); err != nil {
 				return err
 			}

@@ -37,6 +37,15 @@ message Capabilities {
   int32 maxMessagePullSeqsPerStream = 20;
   int32 maxMessagePullSeqs = 21;
   int32 maxMessagePullWorkers = 22;
+  // Independent opt-in for bounded ordinary single/group chat message pulls.
+  // multiStreamMessagePull remains notification-only for old SDKs.
+  bool multiChatMessagePull = 23;
+  int32 chatMessagePullVersion = 24;
+  int32 maxChatMessagePullStreams = 25;
+  int32 maxChatMessagePullSeqsPerStream = 26;
+  int32 maxChatMessagePullSeqs = 27;
+  int32 maxChatMessageRequestBytes = 28;
+  int32 maxChatMessageResponseBytes = 29;
 }
 message SnapshotRequest {
   string userID = 1;
@@ -145,6 +154,26 @@ message BatchPullResult {
   string errorReason = 8;
 }
 message BatchPullResponse { repeated BatchPullResult results = 1; }
+message ChatBatchPullItem {
+  string requestID = 1;
+  string conversationID = 2;
+  repeated int64 seqs = 3;
+  string stateToken = 4;
+}
+message ChatBatchPullRequest {
+  string userID = 1;
+  repeated ChatBatchPullItem items = 2;
+}
+message ChatBatchPullResult {
+  string requestID = 1;
+  string conversationID = 2;
+  State state = 3;
+  repeated openim.sdkws.MsgData messages = 4;
+  repeated int64 unresolvedSeqs = 5;
+  int32 errorCode = 6;
+  string errorReason = 7;
+}
+message ChatBatchPullResponse { repeated ChatBatchPullResult results = 1; }
 message ReleaseRequest { string userID = 1; string snapshotID = 2; }
 message ReleaseResponse {}
 message ScanRequest {
@@ -234,6 +263,7 @@ service MessageSync {
   rpc States(StateRequest) returns (StateResponse);
   rpc Pull(PullRequest) returns (PullResponse);
   rpc BatchPull(BatchPullRequest) returns (BatchPullResponse);
+  rpc BatchPullChat(ChatBatchPullRequest) returns (ChatBatchPullResponse);
 }
 service ConversationSync {
   rpc Probe(UserRequest) returns (Capabilities);

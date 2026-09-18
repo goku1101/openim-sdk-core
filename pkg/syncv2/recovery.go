@@ -78,7 +78,7 @@ func RecoveryFor(err error) Recovery {
 			return Retry
 		}
 	case 12:
-		if apiErr.ErrMsg == "SYNC_V2_DOWNSTREAM_VERSION" || apiErr.ErrMsg == "SYNC_V2_DIRECTORY_TOKEN_GUARD_UNSUPPORTED" {
+		if apiErr.ErrMsg == "SYNC_V2_CHAT_BATCH_UNSUPPORTED" || apiErr.ErrMsg == "SYNC_V2_DOWNSTREAM_VERSION" || apiErr.ErrMsg == "SYNC_V2_DIRECTORY_TOKEN_GUARD_UNSUPPORTED" {
 			return Renegotiate
 		}
 	case 14:

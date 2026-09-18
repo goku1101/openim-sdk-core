@@ -22,6 +22,13 @@ func (c *Client) PullBatched(ctx context.Context, op string, req *pb.PullRequest
 	if cached, ok := ctx.Value(notificationPullKey{}).(*notificationPull); ok && proto.Equal(cached.request, req) {
 		return cached.response, cached.err
 	}
+	if cached, ok := ctx.Value(chatPullKey{}).(*chatPull); ok && proto.Equal(cached.request, req) {
+		return cached.response, cached.err
+	}
+	foreground, _ := ctx.Value(foregroundReadKey{}).(bool)
+	if !req.Notifications && !foreground && chatBatchEnabled(caps) {
+		return c.pullChatBatched(ctx, op, req, caps)
+	}
 	result := new(pb.PullResponse)
 	streamID := req.ConversationID
 	if req.Self {

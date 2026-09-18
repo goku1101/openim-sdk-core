@@ -14,6 +14,9 @@ import (
 
 func notificationPageSize(q *pb.PullRequest, caps *pb.Capabilities) int {
 	n := min(int(caps.MaxBatchSize), 500)
+	if !q.Notifications && chatBatchEnabled(caps) {
+		return chatPageSize(caps)
+	}
 	if q.Notifications && !q.Self && caps.MultiStreamMessagePull {
 		n = min(n, int(caps.MaxMessagePullSeqsPerStream), int(caps.MaxMessagePullSeqs), 100)
 	}

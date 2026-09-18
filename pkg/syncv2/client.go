@@ -58,6 +58,7 @@ type Client struct {
 	batchPullUnsupported atomic.Bool
 	requestSlot          requestAdmission
 	controlSlot          requestAdmission
+	chatBatchSlot        requestAdmission
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
@@ -68,13 +69,19 @@ func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 }
 
 func (c *Client) invoke(ctx context.Context, operationID, route string, req, resp proto.Message) (json.RawMessage, error) {
+	if _, ok := req.(*pb.ChatBatchPullRequest); ok {
+		if err := c.chatBatchSlot.acquire(ctx); err != nil {
+			return nil, err
+		}
+		defer c.chatBatchSlot.release()
+	}
 	if !c.clusterAdmission.Load() {
 		return c.invokeMeasured(ctx, operationID, route, req, resp)
 	}
 	// State/message reads share the server's two-slot read budget. Keep
 	// snapshot/scan/control work serial: build and scan have a one-slot budget.
 	switch req.(type) {
-	case *pb.StateRequest, *pb.PullRequest, *pb.BatchPullRequest:
+	case *pb.StateRequest, *pb.PullRequest, *pb.BatchPullRequest, *pb.ChatBatchPullRequest:
 	default:
 		if err := c.controlSlot.acquire(ctx); err != nil {
 			return nil, err
@@ -138,11 +145,15 @@ func (c *Client) invokeOnce(ctx context.Context, operationID, route string, req,
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: %w", route, &HTTPError{StatusCode: response.StatusCode, RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now())})
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	limit := int64(maxResponseBytes)
+	if budget, ok := ctx.Value(responseBudgetKey{}).(int64); ok {
+		limit = min(limit, budget)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > maxResponseBytes {
+	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("sync v2: response exceeds byte limit")
 	}
 	var envelope struct {
@@ -206,6 +217,12 @@ func (c *Client) Capabilities(ctx context.Context, op string, req *pb.UserReques
 	}
 	if resp.MultiStreamMessagePull && (resp.MaxMessagePullStreams <= 0 || resp.MaxMessagePullSeqsPerStream <= 0 || resp.MaxMessagePullSeqs <= 0 || resp.MaxMessagePullWorkers <= 0) {
 		return nil, fmt.Errorf("sync v2: invalid multi-stream capability limits")
+	}
+	if chatBatchEnabled(resp) {
+		RecordDiagnostic(ctx, "chat_batch_enabled", 1, 0, false)
+		if err := validateChatLimits(resp); err != nil {
+			return nil, err
+		}
 	}
 	c.clusterAdmission.Store(resp.ConversationSyncV2 && resp.ClusterReadAdmission)
 	return resp, nil
