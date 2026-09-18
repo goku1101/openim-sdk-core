@@ -20,7 +20,7 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 	}
 	cp := before
 	resume := !hooks.ForceSnapshot && cp != nil && cp.UserID == user && cp.PolicyVersion == PolicyVersion && cp.SyncDomainID == caps.SyncDomainID && cp.RecoveryVersion == caps.IncrementalRecoveryVersion && cp.NotificationTask != nil && cp.NotificationTask.Status != "invalidated" && cp.SnapshotID != "" && cp.ChangeCursor != ""
-	if resume && cp.NotificationTask.ExpiresAt <= time.Now().Unix() {
+	if resume && !directoryCaptured(cp.NotificationTask) && cp.NotificationTask.ExpiresAt <= time.Now().Unix() {
 		resume = false
 	}
 	if resume {
@@ -107,6 +107,9 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		return persistPendingBeforeCursor(ctx, result, hooks)
 	}
 	task := cp.NotificationTask
+	if hooks.Progress != nil {
+		hooks.Progress(PriorityProgress(task))
+	}
 	if !task.SelfDone {
 		streams, err := c.SyncStreams(ctx, op, &pb.StateRequest{UserID: user, Notifications: true, IncludeSelf: true}, caps, store, hooks.Commit)
 		if err != nil {
@@ -157,7 +160,7 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if time.Now().Unix() >= task.ExpiresAt {
+		if !directoryCaptured(task) && time.Now().Unix() >= task.ExpiresAt {
 			return nil, &APIError{ErrCode: 9, ErrMsg: "SYNC_V2_SNAPSHOT_EXPIRED"}
 		}
 		// At the priority boundary, project the same priority parents. No full chat
@@ -203,6 +206,23 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 				return nil, err
 			}
 		}
+		if task.PriorityReady && !directoryCaptured(task) {
+			var err error
+			cp, err = c.capturePriorityDirectory(ctx, op, cp, caps, store)
+			if err != nil {
+				return nil, err
+			}
+			task = cp.NotificationTask
+			result.Checkpoint = cp
+		}
+		if task.Page == nil && directoryCaptured(task) {
+			spool := store.(priorityDirectoryStore)
+			var err error
+			task.Page, err = spool.GetConversationSyncV2DirectoryPage(ctx, cp.Generation, task.NextPage)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if task.Page == nil {
 			scope, cursor := "notifications", task.NotificationCursor
 			if task.NotificationsDone {
@@ -242,7 +262,7 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 				return nil, err
 			}
 		}
-		streams, err := c.SyncStreams(ctx, op, &pb.StateRequest{UserID: user, ConversationIDs: ids, Notifications: page.Scope == "notifications"}, caps, store, hooks.Commit)
+		streams, err := c.SyncStreams(priorityPageContext(ctx, task, page.Scope, hooks), op, &pb.StateRequest{UserID: user, ConversationIDs: ids, Notifications: page.Scope == "notifications"}, caps, store, hooks.Commit)
 		if err != nil {
 			return nil, err
 		}
@@ -262,6 +282,9 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		page.Offset = end
 		// Task cursor advances only after durable messages and retries are committed.
 		if page.Offset == len(page.IDs) {
+			if directoryCaptured(task) {
+				task.NextPage++
+			}
 			if page.Scope == "notifications" {
 				task.NotificationCursor = page.Cursor
 				task.NotificationsDone = !page.HasMore
@@ -292,9 +315,13 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		}
 		cp = fresh
 		result.Checkpoint = cp
-		reportCount(ctx, "notifications", "streams", task.NotificationProcessed, task.NotificationTotal)
-		if hooks.Progress != nil && task.NotificationTotal > 0 {
-			hooks.Progress(10 + 70*task.NotificationProcessed/task.NotificationTotal)
+		if page.Scope == "chat" {
+			reportCount(ctx, "messages", "conversations", task.ChatProcessed, task.ChatTotal)
+		} else {
+			reportCount(ctx, "notifications", "streams", task.NotificationProcessed, task.NotificationTotal)
+		}
+		if hooks.Progress != nil {
+			hooks.Progress(PriorityProgress(task))
 		}
 	}
 	if !task.PriorityReady {

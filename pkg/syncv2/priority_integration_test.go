@@ -175,10 +175,34 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 	}
 	changed = false
 	interrupt = false
+	// Stop after durable directory capture, then expire the remote snapshot.
+	originalPublish := hooks.Publish
+	hooks.Publish = func(ctx context.Context, cp *model_struct.LocalConversationSyncV2, progress func(int, int)) error {
+		if cp.NotificationTask != nil && cp.NotificationTask.Directory != nil && cp.NotificationTask.Directory.Complete {
+			return fmt.Errorf("simulated process interruption after directory capture")
+		}
+		return originalPublish(ctx, cp, progress)
+	}
+	if _, err = client.Synchronize(ctx, "capture", "u", database, hooks); err == nil {
+		t.Fatal("expected processing interruption")
+	}
+	cp, err = database.GetConversationSyncV2(ctx)
+	if err != nil || cp.NotificationTask.Directory == nil || !cp.NotificationTask.Directory.Complete {
+		t.Fatalf("directory not durable: %v", err)
+	}
+	cp.NotificationTask.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	capturedSnapshots := snapshots
+	hooks.Publish = originalPublish
 	if _, err = client.Synchronize(ctx, "rebuild", "u", database, hooks); err != nil {
 		t.Fatal(err)
 	}
-	if guards != 2 || releases != 1 {
+	if snapshots != capturedSnapshots {
+		t.Fatal("expired captured directory was downloaded again")
+	}
+	if guards != 3 || releases != 1 {
 		t.Fatalf("guards=%d releases=%d", guards, releases)
 	}
 	beforeSnapshots, beforeStates, beforeChanges := snapshots, states, changes

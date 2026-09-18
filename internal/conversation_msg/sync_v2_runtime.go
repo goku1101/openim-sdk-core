@@ -146,7 +146,11 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		}
 	}()
 	completed := false
-	runtime.status.Store(&sdk_struct.ConversationSyncState{UserID: c.loginUserID, Phase: "syncing", Progress: 1})
+	initialProgress := 1
+	if saved, err := runtime.store.GetConversationSyncV2(ctx); err == nil && saved.NotificationTask != nil && saved.NotificationTask.Status != "invalidated" {
+		initialProgress = syncv2.PriorityProgress(saved.NotificationTask)
+	}
+	runtime.status.Store(&sdk_struct.ConversationSyncState{UserID: c.loginUserID, Phase: "syncing", Progress: initialProgress})
 	failState := func() {
 		state := c.GetConversationSyncState()
 		state.Phase = "failed"
@@ -226,7 +230,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		runtime.status.Store(&state)
 	})
 	started := false
-	lastProgress := 1
+	lastProgress := initialProgress
 	hooks := syncv2.CoordinatorHooks{
 		Progress: func(value int) {
 			if ctx.Err() == nil && value > lastProgress && value < 100 {
@@ -258,7 +262,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			if !started {
 				started = true
 				c.ConversationListener().OnSyncServerStart(reinstalled)
-				c.ConversationListener().OnSyncServerProgress(1)
+				c.ConversationListener().OnSyncServerProgress(initialProgress)
 			}
 			return nil
 		},

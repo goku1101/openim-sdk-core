@@ -75,6 +75,8 @@ func (LocalConversationSyncV2Visibility) TableName() string {
 // ConversationSyncV2Task holds opaque resume data in the account database only.
 // The current page is retained until all its durable stream commits complete.
 type ConversationSyncV2Task struct {
+	Directory             *ConversationSyncV2Directory
+	NextPage              int
 	SnapshotVersion       uint64
 	SnapshotVersionID     string
 	BaselineCursor        string
@@ -101,4 +103,21 @@ type ConversationSyncV2TaskPage struct {
 	Cursor  string
 	HasMore bool
 	Offset  int
+}
+
+// Directory capture is independent of message consumption and snapshot lifetime.
+type ConversationSyncV2Directory struct {
+	NotificationProcessed int
+	ChatProcessed         int
+	NotificationCursor    string
+	ChatCursor            string
+	NotificationsDone     bool
+	ChatsDone             bool
+	Pages                 int
+	Complete              bool
+}
+type LocalConversationSyncV2Page struct {
+	Generation string                      `gorm:"primaryKey"`
+	Position   int                         `gorm:"primaryKey"`
+	Page       *ConversationSyncV2TaskPage `gorm:"serializer:json"`
 }

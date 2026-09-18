@@ -259,7 +259,10 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			}
 			return nil
 		}
+		var publishMu sync.Mutex
 		publish := func(i int) {
+			publishMu.Lock()
+			defer publishMu.Unlock()
 			id := ids[i]
 			switch outcomes[i] {
 			case completed:
@@ -305,6 +308,7 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 							first.Do(func() { firstErr = err; cancel() })
 							return
 						}
+						publish(i)
 					}
 				}()
 			}
@@ -314,11 +318,6 @@ func (c *Client) SyncStreams(ctx context.Context, op string, req *pb.StateReques
 			}
 			if err := ctx.Err(); err != nil {
 				return err
-			}
-		}
-		if !req.Notifications && len(ids) >= 2 {
-			for i := range ids {
-				publish(i)
 			}
 		}
 
