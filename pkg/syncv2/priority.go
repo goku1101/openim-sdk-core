@@ -92,12 +92,21 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 	}
 	// Streams own their transactional scanned sequence and message commits.
 	// A crash before task advancement safely replays the page without redelivery.
-	persistStreams := func(streams *StreamResults, notifications bool) error {
+	persistStreams := func(streams *StreamResults, notifications bool, parents []string) error {
 		fresh, err := store.GetConversationSyncV2(ctx)
 		if err != nil {
 			return err
 		}
-		result.Checkpoint = fresh
+		if fresh.Generation != cp.Generation {
+			return fmt.Errorf("sync v2: priority task superseded")
+		}
+		// The current authoritative page is not in the committed prefix yet.
+		// Scope retry planning to that page without advancing its durable cursor.
+		retryCheckpoint := *fresh
+		if notifications && len(parents) > 0 {
+			retryCheckpoint.NotificationIDs = append(slices.Clone(fresh.NotificationIDs), parents...)
+		}
+		result.Checkpoint = &retryCheckpoint
 		result.Chats, result.Notifications = nil, nil
 		if notifications {
 			result.Notifications = streams
@@ -115,7 +124,7 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		if err != nil {
 			return nil, err
 		}
-		if err = persistStreams(streams, true); err != nil {
+		if err = persistStreams(streams, true, nil); err != nil {
 			return nil, err
 		}
 		task.SelfDone = true
@@ -268,7 +277,7 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		if err != nil {
 			return nil, err
 		}
-		if err = persistStreams(streams, page.Scope == "notifications"); err != nil {
+		if err = persistStreams(streams, page.Scope == "notifications", ids); err != nil {
 			return nil, err
 		}
 		if page.Scope == "chat" {

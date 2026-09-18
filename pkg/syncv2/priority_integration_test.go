@@ -22,11 +22,15 @@ import (
 
 func TestPrioritySnapshotResumesBeforeReadingOldTailAndWarmStartUsesChanges(t *testing.T) {
 	for _, count := range []int32{0, 1} {
-		t.Run(fmt.Sprintf("priority_%d", count), func(t *testing.T) { testPrioritySnapshotResume(t, count) })
+		t.Run(fmt.Sprintf("priority_%d", count), func(t *testing.T) { testPrioritySnapshotResume(t, count, false) })
 	}
 }
 
-func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
+func TestPrioritySnapshotPersistsPendingNotificationOutsideCommittedPrefix(t *testing.T) {
+	testPrioritySnapshotResume(t, 1, true)
+}
+
+func testPrioritySnapshotResume(t *testing.T, priorityCount int32, pendingTail bool) {
 	ctx := context.Background()
 	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
 	if err != nil {
@@ -36,6 +40,7 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 	token := strings.Repeat("a", 64)
 	expiry := time.Now().Add(time.Hour).Unix()
 	snapshots, states, guards, changes, releases := 0, 0, 0, 0, 0
+	pendingJobs := 0
 	ready := false
 	interrupt := true
 	guardFirst := false
@@ -105,6 +110,9 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 					sid = "n" + id[strings.IndexByte(id, '_'):]
 				}
 				s := &pb.State{ConversationID: sid, Known: true, MinSeq: 1, StateToken: "t"}
+				if pendingTail && q.Notifications && id == "si_c_u" {
+					s.Known = false
+				}
 				if q.IncludeDetails {
 					s.Conversation = &conversation.Conversation{ConversationID: id, ConversationType: 1, OwnerUserID: "u", UserID: id}
 				}
@@ -127,7 +135,19 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 	}))
 	defer server.Close()
 	client := syncv2.NewClient(server.URL, "", server.Client())
-	hooks := syncv2.CoordinatorHooks{PrepareRelated: func(context.Context) error { return nil }, ReadMetadata: func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error) {
+	hooks := syncv2.CoordinatorHooks{PersistPending: func(ctx context.Context, result *syncv2.SyncResult) error {
+		jobs, err := syncv2.PendingRetryTasks(result, 1000)
+		if err != nil {
+			return err
+		}
+		for _, job := range jobs {
+			if err := database.PutConversationSyncV2Retry(ctx, job); err != nil {
+				return err
+			}
+			pendingJobs++
+		}
+		return nil
+	}, PrepareRelated: func(context.Context) error { return nil }, ReadMetadata: func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error) {
 		t.Error("legacy metadata read")
 		return nil, fmt.Errorf("unexpected")
 	}, PrepareInitial: func(_ context.Context, r *syncv2.Round) error {
@@ -188,6 +208,8 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 	}
 	if _, err = client.Synchronize(ctx, "capture", "u", database, hooks); err == nil {
 		t.Fatal("expected processing interruption")
+	} else if !strings.Contains(err.Error(), "simulated process interruption after directory capture") {
+		t.Fatalf("unexpected processing failure: %v", err)
 	}
 	cp, err = database.GetConversationSyncV2(ctx)
 	if err != nil || cp.NotificationTask.Directory == nil || !cp.NotificationTask.Directory.Complete {
@@ -196,6 +218,9 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 	cp.NotificationTask.ExpiresAt = time.Now().Add(-time.Minute).Unix()
 	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
 		t.Fatal(err)
+	}
+	if pendingTail && pendingJobs == 0 {
+		t.Fatal("pending notification did not become a durable retry")
 	}
 	capturedSnapshots := snapshots
 	hooks.Publish = originalPublish
