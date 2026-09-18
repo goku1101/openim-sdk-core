@@ -23,6 +23,12 @@ import (
 const PolicyVersion = "conversation-sync-v2.2"
 const maxRequestBytes = 64 * 1024
 
+// Chat batches have a separately negotiated envelope budget. Keep a local
+// safety ceiling while allowing the server's SyncV2 limits to be used.
+const maxChatRequestBytes = 4 * 1024 * 1024
+
+type requestBudgetKey struct{}
+
 var diagnosticReason = regexp.MustCompile(`SYNC_V2_[A-Z_]+`)
 
 // The server bounds protobuf responses to 3 MiB. JSON escaping can expand strings
@@ -127,7 +133,18 @@ func (c *Client) invokeOnce(ctx context.Context, operationID, route string, req,
 	if err != nil {
 		return nil, fmt.Errorf("sync v2: encode request: %w", err)
 	}
-	if len(body) > maxRequestBytes {
+	requestLimit := maxRequestBytes
+	if budget, ok := ctx.Value(requestBudgetKey{}).(int64); ok {
+		requestLimit = int(min(int64(requestLimit), budget))
+	}
+	if _, ok := req.(*pb.ChatBatchPullRequest); ok {
+		if budget, ok := ctx.Value(requestBudgetKey{}).(int64); ok {
+			requestLimit = int(min(int64(maxChatRequestBytes), budget))
+		} else {
+			requestLimit = maxChatRequestBytes
+		}
+	}
+	if len(body) > requestLimit {
 		return nil, &APIError{ErrCode: 8, ErrMsg: "SYNC_V2_REQUEST_BYTES"}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+route, bytes.NewReader(body))

@@ -20,6 +20,13 @@ type chatPull struct {
 }
 type responseBudgetKey struct{}
 
+const (
+	// These are local safety ceilings. The effective values remain the
+	// negotiated server capabilities when they are lower.
+	maxChatBatchStreams = 50
+	maxChatBatchSeqs    = 200
+)
+
 func chatBatchEnabled(caps *pb.Capabilities) bool {
 	return caps.MultiChatMessagePull && caps.ChatMessagePullVersion == 1
 }
@@ -102,7 +109,7 @@ func (c *Client) consumeChatsBatch(ctx context.Context, op string, ids []string,
 			}
 			f := &chatPull{request: q}
 			candidate := append(append([]*chatPull(nil), batch...), f)
-			if len(candidate) > min(int(caps.MaxChatMessagePullStreams), 25) || total+len(q.Seqs) > min(int(caps.MaxChatMessagePullSeqs), 500) || chatRequestSize(q.UserID, candidate) > min(int(caps.MaxChatMessageRequestBytes), maxRequestBytes) {
+			if len(candidate) > min(int(caps.MaxChatMessagePullStreams), maxChatBatchStreams) || total+len(q.Seqs) > min(int(caps.MaxChatMessagePullSeqs), maxChatBatchSeqs) || chatRequestSize(q.UserID, candidate) > min(int(caps.MaxChatMessageRequestBytes), maxChatRequestBytes) {
 				if len(batch) != 0 {
 					break
 				}
@@ -169,17 +176,20 @@ func (c *Client) fetchChatBatch(ctx context.Context, op string, fs []*chatPull, 
 		byID[it.RequestID] = f
 		total += len(q.Seqs)
 	}
-	if len(fs) == 1 && len(fs[0].request.Seqs) > 1 && chatRequestSize(req.UserID, fs) > min(int(caps.MaxChatMessageRequestBytes), maxRequestBytes) {
+	if len(fs) == 1 && len(fs[0].request.Seqs) > 1 && chatRequestSize(req.UserID, fs) > min(int(caps.MaxChatMessageRequestBytes), maxChatRequestBytes) {
 		fs[0].err = c.splitChatPull(ctx, op, fs[0], caps)
 		return nil
 	}
-	if len(fs) > min(int(caps.MaxChatMessagePullStreams), 25) || total > min(int(caps.MaxChatMessagePullSeqs), 500) || chatRequestSize(req.UserID, fs) > min(int(caps.MaxChatMessageRequestBytes), maxRequestBytes) {
+	if len(fs) > min(int(caps.MaxChatMessagePullStreams), maxChatBatchStreams) || total > min(int(caps.MaxChatMessagePullSeqs), maxChatBatchSeqs) || chatRequestSize(req.UserID, fs) > min(int(caps.MaxChatMessageRequestBytes), maxChatRequestBytes) {
 		return fmt.Errorf("sync v2: chat batch exceeds negotiated limits")
 	}
 	resp := new(pb.ChatBatchPullResponse)
 	// The backend limits protobuf bytes. Bound JSON expansion and its envelope too.
 	budget := min(int64(caps.MaxChatMessageResponseBytes)*6+4096, int64(maxResponseBytes))
-	_, err := c.invoke(context.WithValue(ctx, responseBudgetKey{}, budget), op, "/msg/sync_chat_messages_batch_v2", req, resp)
+	requestBudget := int64(min(int(caps.MaxChatMessageRequestBytes), maxChatRequestBytes))
+	invokeCtx := context.WithValue(ctx, responseBudgetKey{}, budget)
+	invokeCtx = context.WithValue(invokeCtx, requestBudgetKey{}, requestBudget)
+	_, err := c.invoke(invokeCtx, op, "/msg/sync_chat_messages_batch_v2", req, resp)
 	if err != nil {
 		if chatBatchRetryable(err) {
 			for _, f := range fs {
