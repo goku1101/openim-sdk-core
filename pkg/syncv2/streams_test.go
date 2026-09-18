@@ -125,3 +125,23 @@ func TestSyncStreamsContinuesAfterPermissionIsLostDuringPull(t *testing.T) {
 		t.Fatalf("terminal read blocked remaining stream: %+v %v", result, err)
 	}
 }
+
+// Prepared metadata is scoped to one page; a subsequent foreground event must
+// still invalidate its captured epoch without accepting the old state.
+func TestPreparedChatStateCannotAdoptNewEpoch(t *testing.T) {
+	store := &batchStreamMemory{epochs: map[string]uint64{"si_u_v": 2}}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+	ctx := context.WithValue(context.Background(), preparedChatStatesKey{}, &preparedChatStates{
+		states: map[string]*pb.State{"si_u_v": {ConversationID: "si_u_v", Known: true, StateToken: "t", MinSeq: 1}},
+		epochs: map[string]uint64{"si_u_v": 1},
+	})
+	_, err := NewClient(server.URL, "", server.Client()).SyncStreams(ctx, "test", &pb.StateRequest{UserID: "u", ConversationIDs: []string{"si_u_v"}}, &pb.Capabilities{MaxBatchSize: 500, MaxRequestBytes: 65536}, store, func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error { return nil })
+	if err == nil || store.accepted != 0 || calls != 0 {
+		t.Fatalf("stale prepared state accepted: err=%v accepted=%d requests=%d", err, store.accepted, calls)
+	}
+}

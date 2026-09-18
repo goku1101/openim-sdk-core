@@ -252,8 +252,10 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 			end = min(end, page.Offset+task.PriorityCount-task.NotificationProcessed)
 		}
 		ids := page.IDs[page.Offset:end]
+		pageCtx := ctx
 		if page.Scope == "chat" {
-			if err := c.priorityDetails(ctx, op, cp, ids, caps, store); err != nil {
+			pageCtx = context.WithValue(ctx, preparedChatStatesKey{}, &preparedChatStates{})
+			if err := c.priorityDetails(pageCtx, op, cp, ids, caps, store); err != nil {
 				return nil, err
 			}
 			var err error
@@ -262,7 +264,7 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 				return nil, err
 			}
 		}
-		streams, err := c.SyncStreams(priorityPageContext(ctx, task, page.Scope, hooks), op, &pb.StateRequest{UserID: user, ConversationIDs: ids, Notifications: page.Scope == "notifications"}, caps, store, hooks.Commit)
+		streams, err := c.SyncStreams(priorityPageContext(pageCtx, task, page.Scope, hooks), op, &pb.StateRequest{UserID: user, ConversationIDs: ids, Notifications: page.Scope == "notifications"}, caps, store, hooks.Commit)
 		if err != nil {
 			return nil, err
 		}
@@ -379,7 +381,30 @@ func (c *Client) priorityDetails(ctx context.Context, op string, cp *model_struc
 	if !ok {
 		return fmt.Errorf("sync v2: page storage unavailable")
 	}
-	return subset.ApplyConversationSyncV2MetadataSubset(ctx, cp, &next, states, nil, ids)
+	if err := subset.ApplyConversationSyncV2MetadataSubset(ctx, cp, &next, states, nil, ids); err != nil {
+		return err
+	}
+	if prepared, ok := ctx.Value(preparedChatStatesKey{}).(*preparedChatStates); ok {
+		current, err := store.GetConversationSyncV2(ctx)
+		if err != nil {
+			return err
+		}
+		if current.Generation != cp.Generation || current.Revision != cp.Revision+1 {
+			return fmt.Errorf("sync v2: priority details superseded")
+		}
+		prepared.states = make(map[string]*pb.State, len(states.States))
+		for _, state := range states.States {
+			prepared.states[state.ConversationID] = state
+		}
+		prepared.unavailable = make(map[string]bool, len(states.UnavailableIDs))
+		for _, id := range states.UnavailableIDs {
+			prepared.unavailable[id] = true
+		}
+		// These epochs belong to the committed metadata transaction. Never
+		// recapture live epochs to make an old response appear current.
+		prepared.epochs = current.StateEpochs
+	}
+	return nil
 }
 
 func setPriorityPage(cp *model_struct.LocalConversationSyncV2, p *pb.SnapshotResponse, limit int32) error {

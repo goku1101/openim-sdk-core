@@ -78,6 +78,9 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32) {
 			states++
 			var q pb.StateRequest
 			json.NewDecoder(r.Body).Decode(&q)
+			if !q.Notifications && !q.IncludeDetails {
+				t.Error("chat state fetched again after committed details")
+			}
 			if guardFirst && q.ExpectedDirectoryToken == "" {
 				t.Error("old task read before directory guard")
 			}
