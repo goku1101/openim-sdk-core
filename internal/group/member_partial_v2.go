@@ -182,15 +182,13 @@ func (g *Group) syncPartialGroup(ctx context.Context, groupID string) (bool, err
 		d.mu.Unlock()
 		return true, err
 	}
-	resp, err := g.getAccessibleGroupMemberBatch(ctx, []*protocol.GetIncrementalGroupMemberReq{{GroupID: groupID, VersionID: before.VersionID, Version: before.Version}})
+	change, err := g.getGroupMemberChange(ctx, &protocol.GetIncrementalGroupMemberReq{GroupID: groupID, VersionID: before.VersionID, Version: before.Version})
 	if err != nil {
 		d.mu.Unlock()
+		if errors.Is(err, errGroupInaccessible) {
+			return true, g.clearUnavailableGroup(ctx, groupID)
+		}
 		return true, err
-	}
-	change := resp[groupID]
-	if change == nil {
-		d.mu.Unlock()
-		return true, g.clearUnavailableGroup(ctx, groupID)
 	}
 	err = g.applyPartialDeltaLocked(ctx, groupID, before, change)
 	d.mu.Unlock()

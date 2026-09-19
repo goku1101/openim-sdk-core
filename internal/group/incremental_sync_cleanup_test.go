@@ -102,8 +102,8 @@ func TestMemberBatchMixedGroupsAndWriteFailure(t *testing.T) {
 			if err != nil || len(groups) != 1 || groups[0].GroupID != "healthy" {
 				t.Fatal("mixed cleanup corrupted normal group", err)
 			}
-			if calls != 1 {
-				t.Fatal("omitted group requeued", calls)
+			if calls != 2 {
+				t.Fatal("legacy omission must be confirmed once", calls)
 			}
 		})
 	}

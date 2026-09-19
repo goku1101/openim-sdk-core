@@ -105,11 +105,10 @@ func TestNotificationMemberPermissionAfterLeaving(t *testing.T) {
 				raw, _ := json.Marshal(detail)
 				content, _ := json.Marshal(map[string]string{"detail": string(raw)})
 				err = g.DoNotification(ctx, &sdkws.MsgData{ContentType: kind, Content: content})
-				isolated := kind != constant.GroupInfoSetNotification && scenario != "authentication-failed"
+				// The revised contract makes single-group 1002/1204 terminal;
+				// stale joined-group snapshots no longer veto that result.
+				isolated := scenario != "authentication-failed"
 				expectedCalls := 1
-				if isolated {
-					expectedCalls = 2
-				}
 				if memberCalls != expectedCalls {
 					t.Fatalf("member API calls=%d", memberCalls)
 				}

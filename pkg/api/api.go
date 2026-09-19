@@ -82,7 +82,7 @@ var (
 	CancelMuteGroup                   = newApi[group.CancelMuteGroupReq, group.CancelMuteGroupResp]("/group/cancel_mute_group")
 	SetGroupMemberInfo                = newApi[group.SetGroupMemberInfoReq, group.SetGroupMemberInfoResp]("/group/set_group_member_info")
 	GetIncrementalJoinGroup           = newApi[group.GetIncrementalJoinGroupReq, group.GetIncrementalJoinGroupResp]("/group/get_incremental_join_groups")
-	GetIncrementalGroupMemberBatch    = newApi[group.BatchGetIncrementalGroupMemberReq, group.BatchGetIncrementalGroupMemberResp]("/group/get_incremental_group_members_batch")
+	GetIncrementalGroupMemberBatch    = newApi[group.BatchGetIncrementalGroupMemberReq, GroupMemberBatchResponse]("/group/get_incremental_group_members_batch")
 	GetFullJoinedGroupIDs             = newApi[group.GetFullJoinGroupIDsReq, group.GetFullJoinGroupIDsResp]("/group/get_full_join_group_ids")
 	GetFullGroupMemberUserIDs         = newApi[group.GetFullGroupMemberUserIDsReq, group.GetFullGroupMemberUserIDsResp]("/group/get_full_group_member_user_ids")
 )

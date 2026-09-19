@@ -16,6 +16,7 @@ package group
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
@@ -261,6 +262,9 @@ func (g *Group) doNotification(ctx context.Context, msg *sdkws.MsgData) error {
 // treating the member API's permission denial as an obsolete notification.
 // Callers hold groupSyncMutex, as they do for the original member synchronization.
 func (g *Group) finishNotificationMemberSync(ctx context.Context, groupID string, syncErr error) error {
+	if errors.Is(syncErr, errGroupInaccessible) {
+		return g.clearUnavailableGroup(ctx, groupID)
+	}
 	if !errs.ErrNoPermission.Is(syncErr) {
 		return syncErr
 	}

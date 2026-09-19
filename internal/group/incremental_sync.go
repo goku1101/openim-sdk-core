@@ -79,6 +79,7 @@ func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string
 	}
 	const maxSyncNum = constantpb.MaxSyncPullNumber
 	groupIDSet := datautil.SliceSet(groupIDs)
+	noProgressAttempts := 0
 	var groups []*group.GetIncrementalGroupMemberReq
 	if len(groupIDs) > maxSyncNum {
 		groups = make([]*group.GetIncrementalGroupMemberReq, 0, maxSyncNum)
@@ -89,7 +90,10 @@ func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string
 		if len(groupIDSet) == 0 {
 			return nil
 		}
-		for groupID := range groupIDSet {
+		for _, groupID := range groupIDs {
+			if _, pending := groupIDSet[groupID]; !pending {
+				continue
+			}
 			if len(groups) == cap(groups) {
 				break
 			}
@@ -110,20 +114,39 @@ func (g *Group) syncLegacyGroupAndMember(ctx context.Context, groupIDs ...string
 		if err != nil {
 			return err
 		}
+		madeProgress := false
 		for _, req := range groups {
-			resp := groupVersion[req.GroupID]
-			if resp == nil {
+			item := groupVersion[req.GroupID]
+			if item.status == memberDeferred {
+				continue
+			}
+			if item.status == memberInaccessible {
 				if err := g.clearUnavailableGroup(ctx, req.GroupID); err != nil {
 					return err
 				}
-			} else if err := g.syncGroupAndMember(ctx, req.GroupID, resp); err != nil {
+			} else if err := g.syncGroupAndMember(ctx, req.GroupID, item.payload); err != nil {
 				return err
 			}
 			if progress, ok := ctx.Value(memberSyncProgressKey{}).(*memberSyncProgress); ok {
 				progress.complete(ctx)
 			}
 			delete(groupIDSet, req.GroupID)
+			madeProgress = true
 		}
+		// Commit all successful items before retrying deferred work. Exhaustion
+		// is an error, leaving its stored version and notification checkpoint intact.
+		if madeProgress {
+			noProgressAttempts = 0
+		} else {
+			if noProgressAttempts == maxMemberDeferredRetries {
+				return errGroupDeferred
+			}
+			if err := waitMemberDeferred(ctx, noProgressAttempts); err != nil {
+				return err
+			}
+			noProgressAttempts++
+		}
+
 		groups = groups[:0]
 	}
 }
@@ -271,16 +294,7 @@ func (g *Group) onlineSyncGroupAndMember(ctx context.Context, groupID string, de
 				Version:   version.Version,
 			}
 
-			resp, err := g.getIncrementalGroupMemberBatch(ctx, []*group.GetIncrementalGroupMemberReq{singleGroupReq})
-			if err != nil {
-				return nil, err
-			}
-			if resp != nil {
-				if singleGroupResp, ok := resp[groupID]; ok {
-					return singleGroupResp, nil
-				}
-			}
-			return nil, errs.New("group member version record not found")
+			return g.getGroupMemberChange(ctx, singleGroupReq)
 
 		},
 		Full: func(resp *group.GetIncrementalGroupMemberResp) bool {

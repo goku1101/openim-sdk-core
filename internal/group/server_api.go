@@ -22,9 +22,9 @@ func (g *Group) getFullJoinGroupIDs(ctx context.Context, req *group.GetFullJoinG
 	return api.GetFullJoinedGroupIDs.Invoke(ctx, req)
 }
 
-func (g *Group) getIncrementalGroupMemberBatch(ctx context.Context, reqs []*group.GetIncrementalGroupMemberReq) (map[string]*group.GetIncrementalGroupMemberResp, error) {
+func (g *Group) getIncrementalGroupMemberBatch(ctx context.Context, reqs []*group.GetIncrementalGroupMemberReq) (*api.GroupMemberBatchResponse, error) {
 	req := &group.BatchGetIncrementalGroupMemberReq{UserID: g.loginUserID, ReqList: reqs}
-	return api.ExtractField(ctx, api.GetIncrementalGroupMemberBatch.Invoke, req, (*group.BatchGetIncrementalGroupMemberResp).GetRespList)
+	return api.GetIncrementalGroupMemberBatch.Invoke(ctx, req)
 }
 
 func (g *Group) createGroup(ctx context.Context, req *group.CreateGroupReq) (*group.CreateGroupResp, error) {
