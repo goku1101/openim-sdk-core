@@ -99,15 +99,15 @@ func TestPageReadRetryLimit(t *testing.T) {
 
 func TestPageReadRecognizesBodyTimeout(t *testing.T) {
 	err := &transportError{cause: context.DeadlineExceeded}
-	if !retryablePageRead(context.Background(), err) {
+	if !IsRetryableReadError(context.Background(), err) {
 		t.Fatal("body timeout must retry")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if retryablePageRead(ctx, err) {
+	if IsRetryableReadError(ctx, err) {
 		t.Fatal("session cancellation must not retry")
 	}
-	if retryablePageRead(context.Background(), errors.New("context deadline exceeded")) {
+	if IsRetryableReadError(context.Background(), errors.New("context deadline exceeded")) {
 		t.Fatal("must not classify error text")
 	}
 }

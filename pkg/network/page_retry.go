@@ -18,7 +18,8 @@ type transportError struct {
 
 func (e *transportError) Unwrap() error { return e.cause }
 
-func retryablePageRead(ctx context.Context, err error) bool {
+// IsRetryableReadError identifies transport failures without treating API errors as transient.
+func IsRetryableReadError(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -37,7 +38,7 @@ func fetchPageWithRetry[T any](ctx context.Context, api string, req any) (*T, er
 			return nil, err
 		}
 		resp, err := CallApi[T](ctx, api, req)
-		if err == nil || attempt >= 2 || !retryablePageRead(ctx, err) {
+		if err == nil || attempt >= 2 || !IsRetryableReadError(ctx, err) {
 			return resp, err
 		}
 		timer := time.NewTimer(time.Second << attempt)
