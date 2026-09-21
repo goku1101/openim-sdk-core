@@ -11,6 +11,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/network"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncv2/pb"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
@@ -486,7 +487,12 @@ func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context
 				return err
 			}
 			if err = c.batchAddFaceURLAndName(ctx, conversations...); err != nil {
-				return err
+				if !network.IsRetryableReadError(ctx, err) {
+					return err
+				}
+				// This read failed before profile assignment. Keep persisted names
+				// and avatars; a later refresh can enrich them without failing sync.
+				log.ZWarn(ctx, "sync v2 profile enrichment deferred", err, "conversationCount", len(conversations))
 			}
 			latest, err := c.syncV2.store.GetConversationSyncV2LatestMessages(ctx, conversations)
 			if err != nil {

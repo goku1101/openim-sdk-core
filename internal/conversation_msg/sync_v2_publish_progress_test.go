@@ -5,6 +5,8 @@ package conversation_msg
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
+	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 )
 
 type projectionQueueProbe struct{ *Conversation }
@@ -112,6 +115,66 @@ func TestSyncV2ProjectionProgressFollowsDurableBatches(t *testing.T) {
 			}
 			if !reflect.DeepEqual(batches, expected) {
 				t.Fatalf("reported uncommitted/missing batches: %v, want %v", batches, expected)
+			}
+		})
+	}
+}
+
+func TestSyncV2ProjectionPreservesProfileOnTransportFailure(t *testing.T) {
+	for _, unauthorized := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unauthorized-%t", unauthorized), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/user/get_users_info" {
+					t.Errorf("unexpected route %s", r.URL.Path)
+				}
+				if unauthorized {
+					w.Write([]byte(`{"errCode":1501,"errMsg":"token expired"}`))
+					return
+				}
+				w.Header().Set("Content-Length", "200")
+				w.Write([]byte(`{`))
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithCancel(ccontext.WithOperationID(ccontext.WithInfo(context.Background(), &ccontext.GlobalConfig{UserID: "u", IMConfig: sdk_struct.IMConfig{ApiAddr: server.URL}}), "profile-failure-test"))
+			defer cancel()
+			database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close(ctx)
+			row := &model_struct.LocalConversation{ConversationID: "si_peer_u", ConversationType: constant.SingleChatType, UserID: "peer", ShowName: "Saved name", FaceURL: "saved-avatar", DraftText: "keep"}
+			if err := database.InsertConversation(ctx, row); err != nil {
+				t.Fatal(err)
+			}
+			cp := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "g", Stage: "snapshot", SelectedIDs: []string{row.ConversationID}}
+			if err := database.SaveConversationSyncV2(ctx, cp); err != nil {
+				t.Fatal(err)
+			}
+			cp.Stage = "messages"
+			if err := database.SaveConversationSyncV2(ctx, cp); err != nil {
+				t.Fatal(err)
+			}
+			queue := make(chan common.Cmd2Value, 10)
+			u := user.NewUser(database, "u", queue)
+			c := NewConversation(ctx, &interaction.LongConnMgr{}, database, queue, nil, relation.NewFriend("u", database, u, queue), group.NewGroup("u", database, queue), u, nil)
+			c.ConfigureConversationSyncV2(ctx)
+			stopped := make(chan struct{})
+			go func() { defer close(stopped); common.DoListener(ctx, &projectionQueueProbe{c}) }()
+			defer func() { cancel(); <-stopped }()
+			completed := 0
+			err = c.publishConversationSyncV2WithProgress(ctx, cp, func(done, total int) { completed = done })
+			if unauthorized {
+				if err == nil || completed != 0 {
+					t.Fatalf("authorization failure was swallowed: err=%v progress=%d", err, completed)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := database.GetConversation(ctx, row.ConversationID)
+			if err != nil || completed != 1 || saved.ShowName != "Saved name" || saved.FaceURL != "saved-avatar" || saved.DraftText != "keep" {
+				t.Fatalf("projection lost profile/progress: %+v completed=%d err=%v", saved, completed, err)
 			}
 		})
 	}
