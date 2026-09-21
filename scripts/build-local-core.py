@@ -77,8 +77,12 @@ end
             command += ['-ldflags=-s -w', '-target=ios,iossimulator', '-iosversion=12.0',
                         '-o', str(output / 'OpenIMCore.xcframework')]
         command += ['./open_im_sdk/', './open_im_sdk_callback/']
+        build_env = os.environ.copy()
+        if platform == 'android':
+            # Match Makefile: large per-conversation schemas need the larger hash allocation.
+            build_env['CGO_CFLAGS'] = '-O2 -g -DSQLITE_MALLOC_SOFT_LIMIT=65536'
         with (output / (platform + '-bind.log')).open('w') as log:
-            result = subprocess.run(command, cwd=source, stdout=log, stderr=subprocess.STDOUT)
+            result = subprocess.run(command, cwd=source, env=build_env, stdout=log, stderr=subprocess.STDOUT)
         (output / (platform + '-build-result.json')).write_text(json.dumps({
             'platform': platform, 'sourceDigest': digest, 'exitCode': result.returncode,
             'command': command, 'diagnosticOnly': False}, indent=2))

@@ -89,13 +89,14 @@ func CheckResourceLoad(uSDK *LoginMgr, funcName string) error {
 }
 
 type LoginMgr struct {
-	callMu       sync.Mutex
-	calls        *sessionCalls
-	relation     *relation.Relation
-	group        *group.Group
-	conversation *conv.Conversation
-	user         *user.User
-	file         *file.File
+	loginLifecycleMu sync.Mutex
+	callMu           sync.Mutex
+	calls            *sessionCalls
+	relation         *relation.Relation
+	group            *group.Group
+	conversation     *conv.Conversation
+	user             *user.User
+	file             *file.File
 
 	db           db_interface.DataBase
 	longConnMgr  *interaction.LongConnMgr
@@ -338,7 +339,19 @@ func (u *LoginMgr) handlerSendingMsg(ctx context.Context, sendingMsg *model_stru
 }
 
 func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
+	return u.loginWithDatabase(ctx, userID, token, func(ctx context.Context, userID, dir string, level int) (db_interface.DataBase, error) {
+		return db.NewDataBase(ctx, userID, dir, level)
+	})
+}
+
+func (u *LoginMgr) loginWithDatabase(ctx context.Context, userID, token string, openDatabase func(context.Context, string, string, int) (db_interface.DataBase, error)) error {
+	u.loginLifecycleMu.Lock()
+	if ctx.Err() != nil || u.info == nil {
+		u.loginLifecycleMu.Unlock()
+		return context.Canceled
+	}
 	if u.getLoginStatus(ctx) == Logged {
+		u.loginLifecycleMu.Unlock()
 		return sdkerrs.ErrLoginRepeat
 	}
 	u.setLoginStatus(Logging)
@@ -349,11 +362,21 @@ func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
 	u.info.Token = token
 	u.token = token
 	u.loginUserID = userID
-	var err error
-	u.db, err = db.NewDataBase(ctx, userID, u.info.DataDir, int(u.info.LogLevel))
+	dir, level := u.info.DataDir, int(u.info.LogLevel)
+	u.loginLifecycleMu.Unlock()
+	localDB, err := openDatabase(ctx, userID, dir, level)
+	u.loginLifecycleMu.Lock()
+	defer u.loginLifecycleMu.Unlock()
+	if ctx.Err() != nil || u.info == nil {
+		if localDB != nil {
+			_ = localDB.Close(context.Background())
+		}
+		return context.Canceled
+	}
 	if err != nil {
 		return sdkerrs.ErrSdkInternal.WrapMsg("init database " + err.Error())
 	}
+	u.db = localDB
 	u.checkSendingMessage(ctx)
 	log.ZDebug(ctx, "NewDataBase ok", "userID", userID, "dataDir", u.info.DataDir, "login cost time", time.Since(t1))
 	u.user = user.NewUser(u.db, u.loginUserID, u.conversationCh)
@@ -464,9 +487,14 @@ func (u *LoginMgr) userOnlineStatusChange(users map[string][]int32) {
 }
 
 func (u *LoginMgr) UnInitSDK() {
+	u.loginLifecycleMu.Lock()
+	defer u.loginLifecycleMu.Unlock()
 	if u.getLoginStatus(context.Background()) == Logged {
 		fmt.Println("sdk not logout, please logout first")
 		return
+	}
+	if u.cancel != nil {
+		u.cancel()
 	}
 	u.info = nil
 	u.setLoginStatus(0)
