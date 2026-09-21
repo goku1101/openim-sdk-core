@@ -48,7 +48,8 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		}
 		raw, tokenErr := hex.DecodeString(first.DirectoryToken)
 		if first.SnapshotID == "" || first.BaselineCursor == "" || first.VersionID == "" || first.PolicyVersion != PolicyVersion || first.Scope != "notifications" || first.ExpiresAt <= time.Now().Unix() || tokenErr != nil || len(raw) != 32 || first.NotificationPriorityCount < 0 || first.NotificationPriorityCount > caps.MaxNotificationPriority || int64(first.NotificationPriorityCount) > first.Total || !first.IncludeSelf || (first.Mode != "full" && first.Mode != "filtered") {
-			return nil, fmt.Errorf("sync v2: invalid priority snapshot")
+			return nil, fmt.Errorf("sync v2: invalid priority snapshot: snapshotPresent=%t baselinePresent=%t versionPresent=%t policy=%q scope=%q expiresAt=%d now=%d directoryTokenValid=%t priority=%d maxPriority=%d total=%d includeSelf=%t mode=%q",
+				first.SnapshotID != "", first.BaselineCursor != "", first.VersionID != "", first.PolicyVersion, first.Scope, first.ExpiresAt, time.Now().Unix(), tokenErr == nil && len(raw) == 32, first.NotificationPriorityCount, caps.MaxNotificationPriority, first.Total, first.IncludeSelf, first.Mode)
 		}
 		var generation [16]byte
 		if _, err = rand.Read(generation[:]); err != nil {
