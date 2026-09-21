@@ -82,7 +82,7 @@ func RecoveryFor(err error) Recovery {
 			return Renegotiate
 		}
 	case 14:
-		if apiErr.ErrMsg == "SYNC_V2_REDIS_REQUIRED" || apiErr.ErrMsg == "SYNC_V2_REDIS_UNAVAILABLE" || apiErr.ErrMsg == "SYNC_V2_ADMISSION_UNAVAILABLE" {
+		if apiErr.ErrMsg == "SYNC_V2_CHANGE_BARRIER_PENDING" || apiErr.ErrMsg == "SYNC_V2_REDIS_REQUIRED" || apiErr.ErrMsg == "SYNC_V2_REDIS_UNAVAILABLE" || apiErr.ErrMsg == "SYNC_V2_ADMISSION_UNAVAILABLE" {
 			return Retry
 		}
 	}

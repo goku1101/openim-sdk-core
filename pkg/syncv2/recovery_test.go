@@ -36,6 +36,8 @@ func TestRecoveryRequiresMatchingCodeAndReason(t *testing.T) {
 		{10, "SYNC_V2_RESERVATION_EXPIRED", RebuildSnapshot},
 		{12, "SYNC_V2_DOWNSTREAM_VERSION", Renegotiate},
 		{14, "SYNC_V2_REDIS_UNAVAILABLE", Retry},
+		{14, "SYNC_V2_CHANGE_BARRIER_PENDING", Retry},
+		{3, "SYNC_V2_CHANGE_BARRIER_PENDING", Stop},
 		{7, "SYNC_V2_CONVERSATION_UNAVAILABLE", Unavailable},
 		{3, "SYNC_V2_STATE_CHANGED", Stop},
 		{12, "other", Stop},

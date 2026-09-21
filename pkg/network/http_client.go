@@ -104,7 +104,7 @@ func ApiPost(ctx context.Context, api string, req, resp any) (err error) {
 	response, err := apiClient.Do(request)
 	if err != nil {
 		log.ZError(ctx, "ApiRequest", err, "type", "network error")
-		return sdkerrs.ErrNetwork.WrapMsg("ApiPost http.Client.Do failed " + err.Error())
+		return &transportError{CodeError: sdkerrs.New(sdkerrs.ErrNetwork.Code(), sdkerrs.ErrNetwork.Msg(), "ApiPost http.Client.Do failed "+err.Error()), cause: err}
 	}
 
 	// Ensure the response body is closed after processing.
@@ -135,7 +135,7 @@ func ApiPost(ctx context.Context, api string, req, resp any) (err error) {
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		log.ZError(ctx, "ApiResponse", err, "type", "read body", "status", response.Status)
-		return sdkerrs.ErrSdkInternal.WrapMsg("io.ReadAll(ApiResponse) failed " + err.Error())
+		return &transportError{CodeError: sdkerrs.New(sdkerrs.ErrNetwork.Code(), sdkerrs.ErrNetwork.Msg(), "io.ReadAll(ApiResponse) failed "+err.Error()), cause: err}
 	}
 
 	// Log the response for debugging purposes.
@@ -241,7 +241,7 @@ func FetchAndInsertPagedData[RESP, L any](ctx context.Context, api string, req p
 	totalFetched := 0
 	for i := int32(0); ; i++ {
 		req.GetPagination().PageNumber = i + 1
-		memberResp, err := CallApi[RESP](ctx, api, req)
+		memberResp, err := fetchPageWithRetry[RESP](ctx, api, req)
 		if err != nil {
 			return err
 		}
