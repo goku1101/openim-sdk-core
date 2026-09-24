@@ -75,6 +75,8 @@ func (LocalConversationSyncV2Visibility) TableName() string {
 // ConversationSyncV2Task holds opaque resume data in the account database only.
 // The current page is retained until all its durable stream commits complete.
 type ConversationSyncV2Task struct {
+	// CreateOperationID is persisted before the first request and reused after response loss.
+	CreateOperationID     string
 	Directory             *ConversationSyncV2Directory
 	NextPage              int
 	SnapshotVersion       uint64

@@ -45,6 +45,8 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32, pendingTail b
 	interrupt := true
 	guardFirst := false
 	changed := false
+	failChanges := false
+	failRelease := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var data any
 		switch r.URL.Path {
@@ -121,8 +123,16 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32, pendingTail b
 			data = p
 		case "/conversation/sync_changes_v2":
 			changes++
+			if failChanges {
+				w.WriteHeader(503)
+				return
+			}
 			data = &pb.ChangeResponse{SyncDomainID: "domain", NextCursor: "done", UntilCursor: "done", CaughtUp: true}
 		case "/conversation/sync_snapshot_release":
+			if failRelease {
+				w.WriteHeader(503)
+				return
+			}
 			releases++
 			fmt.Fprint(w, `{"errCode":0}`)
 			return
@@ -224,13 +234,31 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32, pendingTail b
 	}
 	capturedSnapshots := snapshots
 	hooks.Publish = originalPublish
+	failChanges = true
+	if _, err = client.Synchronize(ctx, "rebuild-fail-changes", "u", database, hooks); err == nil {
+		t.Fatal("expected changes interruption")
+	}
+	cp, err = database.GetConversationSyncV2(ctx)
+	if err != nil || !cp.RecoveryBaselineReady || cp.NotificationTask == nil {
+		t.Fatalf("lost cleanup owner after changes failure: %v", err)
+	}
+	failChanges = false
+	failRelease = true
+	if _, err = client.Synchronize(ctx, "resume-fail-release", "u", database, hooks); err == nil {
+		t.Fatal("expected release interruption")
+	}
+	cp, err = database.GetConversationSyncV2(ctx)
+	if err != nil || cp.NotificationTask == nil {
+		t.Fatalf("lost cleanup owner after release failure: %v", err)
+	}
+	failRelease = false
 	if _, err = client.Synchronize(ctx, "rebuild", "u", database, hooks); err != nil {
 		t.Fatal(err)
 	}
 	if snapshots != capturedSnapshots {
 		t.Fatal("expired captured directory was downloaded again")
 	}
-	if guards != 3 || releases != 1 {
+	if guards != 3 || releases != 2 {
 		t.Fatalf("guards=%d releases=%d", guards, releases)
 	}
 	beforeSnapshots, beforeStates, beforeChanges := snapshots, states, changes
@@ -239,5 +267,115 @@ func testPrioritySnapshotResume(t *testing.T, priorityCount int32, pendingTail b
 	}
 	if snapshots != beforeSnapshots || states != beforeStates || changes != beforeChanges+1 {
 		t.Fatalf("warm start rescanned: snapshots=%d states=%d changes=%d", snapshots-beforeSnapshots, states-beforeStates, changes-beforeChanges)
+	}
+}
+
+func TestPriorityCreateResponseLossSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	operations := []string{}
+	snapshots := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/conversation/sync_capabilities":
+			json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.Capabilities{ConversationSyncV2: true, PolicyVersion: syncv2.PolicyVersion, MaxBatchSize: 500, MaxPageSize: 500, MaxRequestBytes: 65536, SnapshotTTLSeconds: 3600, IncrementalRecovery: true, IncrementalRecoveryVersion: syncv2.RecoveryVersion, SyncDomainID: "domain", MaxChangePageSize: 500, NotificationPriorityPrefix: true, MaxNotificationPriority: 500, DirectoryTokenGuard: true}})
+		case "/conversation/sync_snapshot":
+			op := r.Header.Get("operationID")
+			operations = append(operations, op)
+			if snapshots[op] == "" {
+				snapshots[op] = fmt.Sprintf("s-%d", len(snapshots))
+			}
+			// The server has committed the snapshot, but the caller loses its response.
+			if len(operations) == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.SnapshotResponse{SnapshotID: snapshots[op], Scope: "notifications", PolicyVersion: syncv2.PolicyVersion, Mode: "full", VersionID: "v", Version: 1, DirectoryToken: strings.Repeat("a", 64), ExpiresAt: time.Now().Add(time.Hour).Unix(), BaselineCursor: "base", IncludeSelf: true}})
+		case "/msg/sync_seqs_v2":
+			w.WriteHeader(503)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	hooks := syncv2.CoordinatorHooks{PrepareRelated: func(context.Context) error { return nil }, ReadMetadata: func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error) {
+		return nil, nil
+	}, Publish: func(context.Context, *model_struct.LocalConversationSyncV2, func(int, int)) error { return nil }, Commit: func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error { return nil }}
+	for i := 0; i < 3; i++ {
+		database, err := db.NewDataBase(ctx, "u", directory, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := syncv2.NewClient(server.URL, "", server.Client())
+		_, err = client.Synchronize(ctx, fmt.Sprintf("login-%d", i), "u", database, hooks)
+		database.Close(ctx)
+		if err == nil {
+			t.Fatal("expected network interruption")
+		}
+	}
+	if len(operations) != 2 || operations[0] == "" || operations[0] != operations[1] || len(snapshots) != 1 {
+		t.Fatalf("lost durable create identity across restart: requests=%d snapshots=%d sameOperation=%t", len(operations), len(snapshots), len(operations) > 1 && operations[0] == operations[1])
+	}
+}
+
+func TestExplicitSnapshotCancellationRetainsFailedCleanup(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(ctx)
+	cp := &model_struct.LocalConversationSyncV2{UserID: "u", Generation: "generation", Stage: "snapshot", NotificationTask: &model_struct.ConversationSyncV2Task{CreateOperationID: "stable-create", Status: "creating"}}
+	if err = database.SaveConversationSyncV2(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	failRelease := true
+	creates, releases := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/conversation/sync_snapshot":
+			creates++
+			if r.Header.Get("operationID") != "stable-create" {
+				t.Error("cancel did not recover original creation")
+			}
+			json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": &pb.SnapshotResponse{SnapshotID: "known-snapshot"}})
+		case "/conversation/sync_snapshot_release":
+			var request pb.ReleaseRequest
+			json.NewDecoder(r.Body).Decode(&request)
+			if request.SnapshotID != "known-snapshot" {
+				t.Error("released wrong snapshot")
+			}
+			releases++
+			if failRelease {
+				w.WriteHeader(503)
+				return
+			}
+			fmt.Fprint(w, `{"errCode":0}`)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	c := syncv2.NewClient(server.URL, "", server.Client())
+	if err = c.AbandonSnapshot(ctx, "cancel", "u", database); err == nil {
+		t.Fatal("expected interrupted cleanup")
+	}
+	cp, err = database.GetConversationSyncV2(ctx)
+	if err != nil || cp.NotificationTask.Status != "releasing" || cp.SnapshotID != "known-snapshot" {
+		t.Fatalf("lost cleanup state: %v", err)
+	}
+	failRelease = false
+	// A new runtime must finish release without creating another snapshot.
+	c = syncv2.NewClient(server.URL, "", server.Client())
+	if err = c.AbandonSnapshot(ctx, "cancel-retry", "u", database); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.AbandonSnapshot(ctx, "cancel-again", "u", database); err != nil {
+		t.Fatal(err)
+	}
+	cp, err = database.GetConversationSyncV2(ctx)
+	if err != nil || cp.NotificationTask != nil || cp.SnapshotID != "" || creates != 1 || releases != 2 {
+		t.Fatalf("cleanup not idempotent: creates=%d releases=%d err=%v", creates, releases, err)
 	}
 }

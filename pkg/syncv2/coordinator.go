@@ -92,7 +92,7 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 		return nil, err
 	}
 	validRecoveryCheckpoint := caps.IncrementalRecovery && !hooks.ForceSnapshot && checkpointBefore != nil && checkpointBefore.UserID == userID && checkpointBefore.PolicyVersion == PolicyVersion && checkpointBefore.SyncDomainID == caps.SyncDomainID && checkpointBefore.RecoveryVersion == caps.IncrementalRecoveryVersion && checkpointBefore.ChangeCursor != "" && checkpointBefore.Generation != "" && checkpointBefore.VersionID != "" && (checkpointBefore.Stage == "ready" || checkpointBefore.Stage == "messages")
-	if validRecoveryCheckpoint {
+	if validRecoveryCheckpoint && (checkpointBefore.NotificationTask == nil || checkpointBefore.NotificationTask.Status != "releasing") {
 		if hooks.PrepareCached != nil && (checkpointBefore.RecoveryBaselineReady || checkpointBefore.NotificationTask == nil) {
 			if err = hooks.PrepareCached(ctx); err != nil {
 				return nil, err
@@ -106,7 +106,14 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 			if err != nil {
 				return nil, err
 			}
-			return c.recoverChanges(ctx, op, checkpointBefore, caps, store, hooks)
+			result, recoveryErr := c.recoverChanges(ctx, op, checkpointBefore, caps, store, hooks)
+			if recoveryErr != nil {
+				return nil, recoveryErr
+			}
+			if err = c.finishPrioritySnapshot(ctx, op, result.Checkpoint, store); err != nil {
+				return nil, err
+			}
+			return result, nil
 		}
 	}
 	if caps.NotificationPriorityPrefix && caps.DirectoryTokenGuard && caps.IncrementalRecovery {

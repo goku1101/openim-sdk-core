@@ -187,7 +187,7 @@ func (c *Client) invokeOnce(ctx context.Context, operationID, route string, req,
 		return nil, fmt.Errorf("sync v2: response is missing errCode")
 	}
 	if *envelope.ErrCode != 0 {
-		fields := []any{"operationID", operationID, "route", route, "diagnosticReason", diagnosticReason.FindString(envelope.ErrDlt)}
+		fields := []any{"route", route, "diagnosticReason", diagnosticReason.FindString(envelope.ErrDlt)}
 		if pull, ok := req.(*pb.PullRequest); ok {
 			fields = append(fields, "notifications", pull.Notifications, "self", pull.Self, "sequenceCount", len(pull.Seqs))
 			if len(pull.Seqs) > 0 {

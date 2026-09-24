@@ -98,6 +98,15 @@ func Logout(callback open_im_sdk_callback.Base, operationID string) {
 	call(callback, operationID, UserForSDK.Logout)
 }
 
+// LogoutAndReleaseSnapshot explicitly abandons initial synchronization.
+// Ordinary Logout retains the checkpoint for reconnect and account switching.
+func LogoutAndReleaseSnapshot(callback open_im_sdk_callback.Base, operationID string) {
+	call(callback, operationID, UserForSDK.LogoutAndReleaseSnapshot)
+}
+func (u *LoginMgr) LogoutAndReleaseSnapshot(ctx context.Context) error {
+	return u.logout(ctx, false, true)
+}
+
 func SetAppBackgroundStatus(callback open_im_sdk_callback.Base, operationID string, isBackground bool) {
 	call(callback, operationID, UserForSDK.SetAppBackgroundStatus, isBackground)
 }

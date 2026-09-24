@@ -501,7 +501,7 @@ func (u *LoginMgr) UnInitSDK() {
 }
 
 // token error recycle recourse, kicked not recycle
-func (u *LoginMgr) logout(ctx context.Context, isTokenValid bool) error {
+func (u *LoginMgr) logout(ctx context.Context, isTokenValid bool, releaseSnapshot ...bool) error {
 	if ccontext.Info(ctx).OperationID() == LogoutTips {
 		isTokenValid = true
 	}
@@ -516,6 +516,13 @@ func (u *LoginMgr) logout(ctx context.Context, isTokenValid bool) error {
 		}
 	}
 	u.Exit()
+	if len(releaseSnapshot) > 0 && releaseSnapshot[0] {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if cleanupErr := u.conversation.ReleaseConversationSyncSnapshot(cleanup); cleanupErr != nil {
+			log.ZWarn(ctx, "sync v2 snapshot cleanup deferred", cleanupErr)
+		}
+		cancel()
+	}
 	err := u.db.Close(u.ctx)
 	if err != nil {
 		log.ZWarn(ctx, "TriggerCmdLogout db recycle resources failed...", err)

@@ -3,6 +3,7 @@ package conversation_msg
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -336,7 +337,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		action := syncv2.RecoveryFor(err)
 		hooks.ForceSnapshot = action == syncv2.RebuildSnapshot
 		backgroundRetry := c.GetConversationSyncState().PriorityReady && (action == syncv2.Retry || action == syncv2.RefreshState)
-		if ctx.Err() != nil || (!backgroundRetry && (attempt >= 1 || action != syncv2.RebuildSnapshot && action != syncv2.RefreshState && action != syncv2.Retry && action != syncv2.Renegotiate)) {
+		if ctx.Err() != nil || tailRetry >= 6 || (!backgroundRetry && (attempt >= 1 || action != syncv2.RebuildSnapshot && action != syncv2.RefreshState && action != syncv2.Retry && action != syncv2.Renegotiate)) {
 			break
 		}
 		delay := time.Second
@@ -348,6 +349,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 				runHeld = false
 			}
 		}
+		delay = delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -522,4 +524,12 @@ func (c *Conversation) publishConversationSyncV2WithProgress(ctx context.Context
 		}
 	}
 	return nil
+}
+
+// ReleaseConversationSyncSnapshot runs after the owning login has joined all workers.
+func (c *Conversation) ReleaseConversationSyncSnapshot(ctx context.Context) error {
+	if c.syncV2 == nil {
+		return nil
+	}
+	return c.syncV2.client.AbandonSnapshot(ctx, ccontext.Info(ctx).OperationID(), c.loginUserID, c.syncV2.store)
 }

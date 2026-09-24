@@ -19,6 +19,16 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 		return nil, fmt.Errorf("sync v2: invalid priority limit")
 	}
 	cp := before
+	if cp != nil && cp.UserID == user && cp.NotificationTask != nil && cp.NotificationTask.Status == "releasing" {
+		if err := c.AbandonSnapshot(ctx, op, user, store); err != nil {
+			return nil, err
+		}
+		var err error
+		cp, err = store.GetConversationSyncV2(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	resume := !hooks.ForceSnapshot && cp != nil && cp.UserID == user && cp.PolicyVersion == PolicyVersion && cp.SyncDomainID == caps.SyncDomainID && cp.RecoveryVersion == caps.IncrementalRecoveryVersion && cp.NotificationTask != nil && cp.NotificationTask.Status != "invalidated" && cp.SnapshotID != "" && cp.ChangeCursor != ""
 	if resume && !directoryCaptured(cp.NotificationTask) && cp.NotificationTask.ExpiresAt <= time.Now().Unix() {
 		resume = false
@@ -42,21 +52,54 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 			return nil, err
 		}
 	} else {
-		first, err := c.Snapshot(ctx, op, &pb.SnapshotRequest{UserID: user, Scope: "notifications", PageSize: min(caps.MaxPageSize, 500), NotificationPriorityPrefix: true})
+		creating := !hooks.ForceSnapshot && cp != nil && cp.UserID == user && cp.PolicyVersion == PolicyVersion && cp.SyncDomainID == caps.SyncDomainID && cp.RecoveryVersion == caps.IncrementalRecoveryVersion && cp.NotificationTask != nil && cp.NotificationTask.Status == "creating" && cp.NotificationTask.CreateOperationID != ""
+		if !creating {
+			// Keep the obsolete owner until release succeeds; do not allocate another slot.
+			if cp != nil && cp.UserID == user && cp.SnapshotID != "" && cp.NotificationTask != nil {
+				cp.NotificationTask.Status = "invalidated"
+				if err := store.SaveConversationSyncV2(ctx, cp); err != nil {
+					return nil, err
+				}
+				if err := c.releasePrioritySnapshot(ctx, op, user, cp.SnapshotID); err != nil {
+					return nil, err
+				}
+			}
+			var generation [16]byte
+			if _, err := rand.Read(generation[:]); err != nil {
+				return nil, err
+			}
+			identity := hex.EncodeToString(generation[:])
+			cp = &model_struct.LocalConversationSyncV2{UserID: user, Generation: identity, PolicyVersion: PolicyVersion, Stage: "snapshot", SyncDomainID: caps.SyncDomainID, RecoveryVersion: caps.IncrementalRecoveryVersion, NotificationTask: &model_struct.ConversationSyncV2Task{CreateOperationID: identity, Status: "creating"}}
+			if err := store.SaveConversationSyncV2(ctx, cp); err != nil {
+				return nil, err
+			}
+		}
+		first, err := c.Snapshot(ctx, cp.NotificationTask.CreateOperationID, &pb.SnapshotRequest{UserID: user, SnapshotID: cp.SnapshotID, Scope: "notifications", PageSize: min(caps.MaxPageSize, 500), NotificationPriorityPrefix: true})
 		if err != nil {
+			return nil, err
+		}
+		// Persist the remote owner before validating or consuming its first page.
+		cp.SnapshotID = first.SnapshotID
+		if err = store.SaveConversationSyncV2(ctx, cp); err != nil {
 			return nil, err
 		}
 		raw, tokenErr := hex.DecodeString(first.DirectoryToken)
 		if first.SnapshotID == "" || first.BaselineCursor == "" || first.VersionID == "" || first.PolicyVersion != PolicyVersion || first.Scope != "notifications" || first.ExpiresAt <= time.Now().Unix() || tokenErr != nil || len(raw) != 32 || first.NotificationPriorityCount < 0 || first.NotificationPriorityCount > caps.MaxNotificationPriority || int64(first.NotificationPriorityCount) > first.Total || !first.IncludeSelf || (first.Mode != "full" && first.Mode != "filtered") {
+			cp.NotificationTask.Status = "invalidated"
+			if err = store.SaveConversationSyncV2(ctx, cp); err != nil {
+				return nil, err
+			}
+			if first.SnapshotID != "" {
+				if err = c.releasePrioritySnapshot(ctx, op, user, first.SnapshotID); err != nil {
+					return nil, err
+				}
+			}
 			return nil, fmt.Errorf("sync v2: invalid priority snapshot: snapshotPresent=%t baselinePresent=%t versionPresent=%t policy=%q scope=%q expiresAt=%d now=%d directoryTokenValid=%t priority=%d maxPriority=%d total=%d includeSelf=%t mode=%q",
 				first.SnapshotID != "", first.BaselineCursor != "", first.VersionID != "", first.PolicyVersion, first.Scope, first.ExpiresAt, time.Now().Unix(), tokenErr == nil && len(raw) == 32, first.NotificationPriorityCount, caps.MaxNotificationPriority, first.Total, first.IncludeSelf, first.Mode)
 		}
-		var generation [16]byte
-		if _, err = rand.Read(generation[:]); err != nil {
-			return nil, err
-		}
-		cp = &model_struct.LocalConversationSyncV2{UserID: user, Generation: hex.EncodeToString(generation[:]), PolicyVersion: PolicyVersion, Stage: "snapshot", SnapshotID: first.SnapshotID, VersionID: first.VersionID, Version: first.Version, ChangeCursor: first.BaselineCursor, SyncDomainID: caps.SyncDomainID, RecoveryVersion: caps.IncrementalRecoveryVersion, IncludeSelf: true,
-			NotificationTask: &model_struct.ConversationSyncV2Task{SnapshotVersion: first.Version, SnapshotVersionID: first.VersionID, BaselineCursor: first.BaselineCursor, DirectoryToken: first.DirectoryToken, ExpiresAt: first.ExpiresAt, Mode: first.Mode, PriorityCount: int(first.NotificationPriorityCount), NotificationTotal: int(first.Total), ChatTotal: -1, Status: "building_snapshot"}}
+		createOperationID := cp.NotificationTask.CreateOperationID
+		cp.VersionID, cp.Version, cp.ChangeCursor, cp.IncludeSelf = first.VersionID, first.Version, first.BaselineCursor, true
+		cp.NotificationTask = &model_struct.ConversationSyncV2Task{CreateOperationID: createOperationID, SnapshotVersion: first.Version, SnapshotVersionID: first.VersionID, BaselineCursor: first.BaselineCursor, DirectoryToken: first.DirectoryToken, ExpiresAt: first.ExpiresAt, Mode: first.Mode, PriorityCount: int(first.NotificationPriorityCount), NotificationTotal: int(first.Total), ChatTotal: -1, Status: "building_snapshot"}
 		if err = setPriorityPage(cp, first, min(caps.MaxPageSize, 500)); err != nil {
 			return nil, err
 		}
@@ -360,13 +403,33 @@ func (c *Client) synchronizePriority(ctx context.Context, op, user string, store
 	if err != nil {
 		return nil, err
 	}
-	// Release only after both directories and the bounded changes watermark commit.
-	_ = c.Release(ctx, op, &pb.ReleaseRequest{UserID: user, SnapshotID: cp.SnapshotID})
-	result.Checkpoint.NotificationTask = nil
-	if err = store.SaveConversationSyncV2(ctx, result.Checkpoint); err != nil {
+	if err = c.finishPrioritySnapshot(ctx, op, result.Checkpoint, store); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (c *Client) releasePrioritySnapshot(ctx context.Context, op, user, snapshotID string) error {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	return c.Release(cleanup, op, &pb.ReleaseRequest{UserID: user, SnapshotID: snapshotID})
+}
+
+// Keep the task until release succeeds, so the changes-only recovery path can retry cleanup.
+func (c *Client) finishPrioritySnapshot(ctx context.Context, op string, cp *model_struct.LocalConversationSyncV2, store CoordinatorStore) error {
+	if cp.NotificationTask == nil || cp.SnapshotID == "" {
+		return nil
+	}
+	if err := c.releasePrioritySnapshot(ctx, op, cp.UserID, cp.SnapshotID); err != nil {
+		return err
+	}
+	next := *cp
+	next.NotificationTask = nil
+	if err := store.SaveConversationSyncV2(ctx, &next); err != nil {
+		return err
+	}
+	*cp = next
+	return nil
 }
 
 func (c *Client) priorityDetails(ctx context.Context, op string, cp *model_struct.LocalConversationSyncV2, ids []string, caps *pb.Capabilities, store CoordinatorStore) error {

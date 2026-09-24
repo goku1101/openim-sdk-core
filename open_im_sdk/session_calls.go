@@ -44,7 +44,7 @@ func captureSDKCall(fn any) (context.Context, func(), error) {
 	defer manager.callMu.Unlock()
 	ctx := manager.ctx
 	// Logout itself owns shutdown; joining it would deadlock. Login establishes resources.
-	if strings.HasSuffix(name, ".Login-fm") || strings.HasSuffix(name, ".Logout-fm") || strings.HasSuffix(name, ".Log-fm") {
+	if strings.HasSuffix(name, ".Login-fm") || strings.HasSuffix(name, ".Logout-fm") || strings.HasSuffix(name, ".LogoutAndReleaseSnapshot-fm") || strings.HasSuffix(name, ".Log-fm") {
 		return ctx, func() {}, nil
 	}
 	if manager.calls == nil {
