@@ -18,10 +18,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/ccontext"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/crashdiagnostics"
 	pbConstant "github.com/openimsdk/protocol/constant"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
@@ -53,6 +56,9 @@ func InitSDK(listener open_im_sdk_callback.OnConnListener, operationID string, c
 	if err := json.Unmarshal([]byte(config), &configArgs); err != nil {
 		fmt.Println(operationID, "Unmarshal failed ", err.Error(), config)
 		return false
+	}
+	if runtime.GOOS == "android" && configArgs.DataDir != "" {
+		crashdiagnostics.Configure(filepath.Dir(configArgs.DataDir))
 	}
 	if configArgs.PlatformID == 0 {
 		return false
