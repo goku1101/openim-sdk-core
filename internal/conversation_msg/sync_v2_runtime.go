@@ -153,11 +153,10 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		initialProgress = syncv2.PriorityProgress(saved.NotificationTask)
 	}
 	runtime.status.Store(&sdk_struct.ConversationSyncState{UserID: c.loginUserID, Phase: "syncing", Progress: initialProgress})
+	failureAction := syncv2.Stop
 	failState := func() {
 		state := c.GetConversationSyncState()
-		state.Phase = "failed"
-		state.InitialDataReady = false
-		state.PriorityReady = false
+		state = conversationSyncV2FailureState(state, ctx.Err() != nil, failureAction)
 		runtime.status.Store(&state)
 	}
 	defer func() {
@@ -287,7 +286,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 			if err != nil {
 				return err
 			}
-			state.PriorityReady = checkpoint.NotificationTask != nil && checkpoint.NotificationTask.PriorityReady
+			state.PriorityReady = checkpoint.NotificationTask != nil && checkpoint.NotificationTask.PriorityReady || checkpoint.ScanTask != nil && checkpoint.ScanTask.InitialReady
 			runtime.status.Store(&state)
 			c.ConversationListener().OnSyncServerProgress(state.Progress)
 			return nil
@@ -335,6 +334,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		}
 		log.ZWarn(ctx, "sync v2 synchronization failed", err, "attempt", attempt+1)
 		action := syncv2.RecoveryFor(err)
+		failureAction = action
 		hooks.ForceSnapshot = action == syncv2.RebuildSnapshot
 		backgroundRetry := c.GetConversationSyncState().PriorityReady && (action == syncv2.Retry || action == syncv2.RefreshState)
 		if ctx.Err() != nil || tailRetry >= 6 || (!backgroundRetry && (attempt >= 1 || action != syncv2.RebuildSnapshot && action != syncv2.RefreshState && action != syncv2.Retry && action != syncv2.Renegotiate)) {
@@ -370,6 +370,7 @@ func (c *Conversation) SynchronizeConversationV2(ctx context.Context, reinstalle
 		runtime.status.Store(&sdk_struct.ConversationSyncState{Phase: "idle"})
 		return false, nil
 	}
+	failureAction = syncv2.Stop
 	if err = c.persistConversationSyncV2Pending(ctx, result); err != nil {
 		failState()
 		c.ConversationListener().OnSyncServerFailed(reinstalled)

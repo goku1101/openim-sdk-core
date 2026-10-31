@@ -4,7 +4,8 @@ package model_struct
 // does not replace legacy UIDList or authorize deletion of local conversations.
 // Incomplete snapshots are rebuilt; detail/message stages can replay idempotently.
 type LocalConversationSyncV2 struct {
-	NotificationTask *ConversationSyncV2Task `gorm:"column:notification_task;serializer:json"`
+	ScanTask         *ConversationSyncV2ScanTask `gorm:"column:scan_task;serializer:json"`
+	NotificationTask *ConversationSyncV2Task     `gorm:"column:notification_task;serializer:json"`
 	// Recovery tokens are opaque and belong to this account and server domain.
 	ChangeCursor          string            `gorm:"column:change_cursor"`
 	ChangeUntilCursor     string            `gorm:"column:change_until_cursor"`
@@ -122,4 +123,21 @@ type LocalConversationSyncV2Page struct {
 	Generation string                      `gorm:"primaryKey"`
 	Position   int                         `gorm:"primaryKey"`
 	Page       *ConversationSyncV2TaskPage `gorm:"serializer:json"`
+}
+
+// Scan tasks are installation-local and never infer deletion from missing IDs.
+type ConversationSyncV2ScanTask struct {
+	PageSize      int32
+	Chat          ConversationSyncV2ScanScope
+	Notifications ConversationSyncV2ScanScope
+	SelfDone      bool
+	InitialReady  bool
+	RecoveryRound int
+}
+type ConversationSyncV2ScanScope struct {
+	Cursor   string
+	Baseline string
+	Started  bool
+	Done     bool
+	Page     *ConversationSyncV2TaskPage
 }

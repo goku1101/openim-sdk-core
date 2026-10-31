@@ -197,6 +197,9 @@ message ScanResponse {
   bool includeSelf = 10;
   // Always true. This endpoint must not be treated as a fixed snapshot.
   bool live = 11;
+  // Optional safe change-feed position captured before the first candidate read.
+  // Repeat unchanged on every continuation; empty means no incremental baseline.
+  string baselineCursor = 12;
 }
 message ChangeRequest {
   string userID = 1;

@@ -65,7 +65,7 @@ func RecoveryFor(err error) Recovery {
 			return Retry
 		}
 	case 9:
-		if apiErr.ErrMsg == "SYNC_V2_DIRECTORY_CHANGED" || apiErr.ErrMsg == "SYNC_V2_SNAPSHOT_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_POLICY_CHANGED" || apiErr.ErrMsg == "SYNC_V2_CHANGE_CURSOR_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_CHANGE_GENERATION_CHANGED" {
+		if apiErr.ErrMsg == "SYNC_V2_DIRECTORY_CHANGED" || apiErr.ErrMsg == "SYNC_V2_SNAPSHOT_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_SCAN_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_POLICY_CHANGED" || apiErr.ErrMsg == "SYNC_V2_CHANGE_CURSOR_EXPIRED" || apiErr.ErrMsg == "SYNC_V2_CHANGE_GENERATION_CHANGED" {
 			return RebuildSnapshot
 		}
 	case 10:

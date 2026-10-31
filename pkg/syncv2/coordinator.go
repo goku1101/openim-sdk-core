@@ -52,6 +52,10 @@ type SyncResult struct {
 // a caller may rebuild a snapshot on the classified error, with bounded retries.
 // Pending state or storage holes remain retryable after the UI becomes ready.
 func (c *Client) Synchronize(ctx context.Context, op, userID string, store CoordinatorStore, hooks CoordinatorHooks) (*SyncResult, error) {
+	if !c.synchronizing.CompareAndSwap(false, true) {
+		return nil, ErrCatchupPending
+	}
+	defer c.synchronizing.Store(false)
 	if store == nil || hooks.PrepareRelated == nil || hooks.ReadMetadata == nil || hooks.Commit == nil || hooks.Publish == nil {
 		return nil, fmt.Errorf("sync v2: incomplete coordinator dependencies")
 	}
@@ -90,6 +94,25 @@ func (c *Client) Synchronize(ctx context.Context, op, userID string, store Coord
 	checkpointBefore, err := store.GetConversationSyncV2(ctx)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
+	}
+	// A partial live scan is not a completed fixed snapshot when capability
+	// availability changes during a rolling server upgrade.
+	if checkpointBefore != nil && checkpointBefore.ScanTask != nil && (!caps.ProgressiveScan || !caps.IncrementalRecovery) {
+		hooks.ForceSnapshot = true
+	}
+	// An unfinished scan owns both baseline catch-up rounds, even when the
+	// first round has already committed a ready change cursor.
+	if caps.ProgressiveScan && caps.IncrementalRecovery && !hooks.ForceSnapshot &&
+		(checkpointBefore == nil || checkpointBefore.ScanTask != nil || !checkpointBefore.RecoveryBaselineReady && checkpointBefore.SnapshotID == "") {
+		result, scanErr := c.synchronizeScan(ctx, op, userID, store, hooks, caps, checkpointBefore)
+		if !errors.Is(scanErr, errScanBaselineRequired) {
+			return result, scanErr
+		}
+		hooks.ForceSnapshot = true
+		checkpointBefore, err = store.GetConversationSyncV2(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	validRecoveryCheckpoint := caps.IncrementalRecovery && !hooks.ForceSnapshot && checkpointBefore != nil && checkpointBefore.UserID == userID && checkpointBefore.PolicyVersion == PolicyVersion && checkpointBefore.SyncDomainID == caps.SyncDomainID && checkpointBefore.RecoveryVersion == caps.IncrementalRecoveryVersion && checkpointBefore.ChangeCursor != "" && checkpointBefore.Generation != "" && checkpointBefore.VersionID != "" && (checkpointBefore.Stage == "ready" || checkpointBefore.Stage == "messages")
 	if validRecoveryCheckpoint && (checkpointBefore.NotificationTask == nil || checkpointBefore.NotificationTask.Status != "releasing") {

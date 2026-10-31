@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -55,7 +56,7 @@ const (
 	pingPeriod = 24 * time.Second
 
 	// Maximum message size allowed from peer.
-	maxMessageSize = 1024 * 1024
+	maxMessageSize = 64 * 1024 * 1024
 
 	//Maximum number of reconnection attempts
 	maxReconnectAttempts = 300
@@ -246,6 +247,7 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		log.ZWarn(c.ctx, "readPump closed", c.getClosedErr())
 	}()
 	connNum := 0
+	payloadFailures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -276,6 +278,20 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 			log.ZError(c.ctx, "readMessage err", err, "goroutine ID:", getGoroutineID())
 			_ = c.close()
 			c.sub.onConnClosed(err)
+			if errors.Is(err, websocket.ErrReadLimit) || websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+				payloadFailures++
+				if payloadFailures >= 3 {
+					c.setClosedErr(err)
+					return
+				}
+				delay := time.Second * time.Duration(1<<payloadFailures)
+				delay += time.Duration(rand.Int63n(int64(delay / 2)))
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+			}
 			continue
 		}
 		switch messageType {
@@ -661,14 +677,17 @@ func (c *LongConnMgr) handleMessage(message []byte) error {
 		var decompressErr error
 		message, decompressErr = c.compressor.DecompressWithPool(message)
 		if decompressErr != nil {
-			log.ZError(c.ctx, "DeCompress failed", decompressErr, message)
+			log.ZError(c.ctx, "DeCompress failed", decompressErr)
+			if errors.Is(decompressErr, ErrDecompressedMessageTooLarge) {
+				return fmt.Errorf("%w: %w", sdkerrs.ErrMsgDeCompression, decompressErr)
+			}
 			return sdkerrs.ErrMsgDeCompression
 		}
 	}
 	var wsResp GeneralWsResp
 	err := c.encoder.Decode(message, &wsResp)
 	if err != nil {
-		log.ZError(c.ctx, "decodeBinaryWs err", err, "message", message)
+		log.ZError(c.ctx, "decodeBinaryWs err", err, "bytes", len(message))
 		return sdkerrs.ErrMsgDecodeBinaryWs
 	}
 	ctx := context.WithValue(c.ctx, "operationID", wsResp.OperationID)
@@ -827,13 +846,13 @@ func (c *LongConnMgr) reConn(ctx context.Context, num *int) (needRecon bool, err
 	defer c.connWrite.Unlock()
 	c.listener.OnConnecting()
 	c.SetConnectionStatus(Connecting)
-	url := fmt.Sprintf("%s?sendID=%s&token=%s&platformID=%d&operationID=%s&isBackground=%t",
+	url := fmt.Sprintf("%s?sendID=%s&token=%s&platformID=%d&operationID=%s&isBackground=%t&maxFrameBytes=%d",
 		ccontext.Info(ctx).WsAddr(), ccontext.Info(ctx).UserID(), ccontext.Info(ctx).Token(),
-		ccontext.Info(ctx).PlatformID(), ccontext.Info(ctx).OperationID(), c.GetBackground())
+		ccontext.Info(ctx).PlatformID(), ccontext.Info(ctx).OperationID(), c.GetBackground(), maxMessageSize)
 	if c.IsCompression {
 		url += fmt.Sprintf("&compression=%s", "gzip")
 	}
-	log.ZDebug(ctx, "conn start", "url", url)
+	log.ZDebug(ctx, "conn start", "maxFrameBytes", maxMessageSize)
 	resp, err := c.conn.Dial(url, nil)
 	if err != nil {
 		c.SetConnectionStatus(Closed)

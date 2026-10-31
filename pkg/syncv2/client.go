@@ -58,6 +58,7 @@ type HTTPError struct {
 func (e *HTTPError) Error() string { return fmt.Sprintf("sync v2 HTTP status %d", e.StatusCode) }
 
 type Client struct {
+	synchronizing        atomic.Bool
 	baseURL              string
 	token                string
 	http                 *http.Client

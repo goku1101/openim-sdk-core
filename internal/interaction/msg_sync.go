@@ -717,7 +717,7 @@ func (m *MsgSyncer) pullMsgBySeqRange(ctx context.Context, seqMap map[string][2]
 		})
 	}
 	resp = &sdkws.PullMessageBySeqsResp{}
-	if err := m.longConnMgr.SendReqWaitResp(ctx, &req, constant.PullMsgByRange, resp); err != nil {
+	if err := pullRangesIndividually(ctx, &req, resp, m.longConnMgr.SendReqWaitResp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -731,7 +731,7 @@ func (m *MsgSyncer) fetchLatestValidMessages(ctx context.Context, conversationID
 		ConversationIDs: conversationID,
 	}
 	resp = &msg.GetLastMessageResp{}
-	if err := m.longConnMgr.SendReqWaitResp(ctx, &req, constant.PullConvLastMessage, resp); err != nil {
+	if err := pullLastMessagesBounded(ctx, &req, resp, m.longConnMgr.SendReqWaitResp); err != nil {
 		return nil, err
 	}
 	return resp, nil

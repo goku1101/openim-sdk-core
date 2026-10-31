@@ -23,6 +23,22 @@ import (
 	"sync"
 )
 
+// This is the decoded payload limit, independent of the negotiated wire budget.
+const maxDecompressedMessageSize int64 = 128 << 20
+
+var ErrDecompressedMessageTooLarge = errors.New("decompressed websocket message exceeds 128 MiB")
+
+func readDecompressedMessage(reader io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if int64(len(data)) > limit {
+		return nil, ErrDecompressedMessageTooLarge
+	}
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 var (
 	gzipWriterPool = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
 	gzipReaderPool = sync.Pool{New: func() any { return new(gzip.Reader) }}
@@ -77,11 +93,11 @@ func (g *GzipCompressor) DeCompress(compressedData []byte) ([]byte, error) {
 	if err != nil {
 		return nil, errs.WrapMsg(err, "NewReader failed")
 	}
-	compressedData, err = io.ReadAll(reader)
+	defer reader.Close()
+	compressedData, err = readDecompressedMessage(reader, maxDecompressedMessageSize)
 	if err != nil {
-		return nil, errs.WrapMsg(err, "ReadAll failed")
+		return nil, err
 	}
-	_ = reader.Close()
 	return compressedData, nil
 }
 
@@ -97,10 +113,10 @@ func (g *GzipCompressor) DecompressWithPool(compressedData []byte) ([]byte, erro
 		return nil, errs.WrapMsg(err, "NewReader failed")
 	}
 
-	compressedData, err = io.ReadAll(reader)
+	defer reader.Close()
+	compressedData, err = readDecompressedMessage(reader, maxDecompressedMessageSize)
 	if err != nil {
-		return nil, errs.WrapMsg(err, "ReadAll failed")
+		return nil, err
 	}
-	_ = reader.Close()
 	return compressedData, nil
 }
