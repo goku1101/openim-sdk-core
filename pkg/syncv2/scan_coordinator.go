@@ -158,9 +158,6 @@ func (c *Client) synchronizeScan(ctx context.Context, op, user string, store Coo
 					cp.NotificationIDs = append(cp.NotificationIDs, id)
 				}
 			}
-			if len(streams.PendingIDs) > 0 || len(streams.UnavailableIDs) > 0 {
-				return ErrCatchupPending
-			}
 		}
 		if err = persistPendingBeforeCursor(ctx, result, hooks); err != nil {
 			return err
@@ -210,8 +207,13 @@ func (c *Client) synchronizeScan(ctx context.Context, op, user string, store Coo
 		if err != nil {
 			return nil, err
 		}
-		if len(streams.PendingIDs) > 0 || len(streams.UnavailableIDs) > 0 {
-			return nil, ErrCatchupPending
+		// Unknown parent streams remain durable work; they do not invalidate
+		// the independently readable first chat page. Self notifications above
+		// still gate account-wide permission changes.
+		projection := *cp
+		projection.NotificationIDs = append(append([]string(nil), cp.NotificationIDs...), cp.SelectedIDs...)
+		if err = persistPendingBeforeCursor(ctx, &SyncResult{Enabled: true, Capabilities: caps, Checkpoint: &projection, Notifications: streams}, hooks); err != nil {
+			return nil, err
 		}
 		if hooks.PrepareInitial != nil {
 			if err = hooks.PrepareInitial(ctx, &Round{Enabled: true, PriorityComplete: true, Capabilities: caps, Checkpoint: cp, ChatStates: states}); err != nil {

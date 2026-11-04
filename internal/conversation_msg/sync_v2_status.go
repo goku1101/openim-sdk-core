@@ -16,6 +16,7 @@ func (c *Conversation) GetConversationSyncState() sdk_struct.ConversationSyncSta
 	if current := runtime.status.Load(); current != nil {
 		state = *current
 	}
+	state.PendingRetries = runtime.pendingRetries.Load()
 	switch runtime.mode.Load() {
 	case syncV2Legacy:
 		state.Mode = "legacy"

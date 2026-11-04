@@ -3,6 +3,7 @@ package sdk_struct
 // ConversationSyncState describes the current full native synchronization.
 // Login status and readable local resources are not evidence of sync completion.
 type ConversationSyncState struct {
+	PendingRetries   bool                    `json:"pendingRetries"`
 	UserID           string                  `json:"userID"`
 	PriorityReady    bool                    `json:"priorityReady"`
 	InitialDataReady bool                    `json:"initialDataReady"`

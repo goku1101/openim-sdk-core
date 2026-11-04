@@ -35,7 +35,7 @@ func (c *Conversation) StartConversationSyncV2Retries(ctx context.Context) error
 	r.retryWake = make(chan struct{}, 1)
 	go func() {
 		defer close(r.retryDone)
-		_ = syncv2.RunRetryTasks(ctx, r.store, r.retryWake, c.runConversationSyncV2Retry)
+		_ = syncv2.RunRetryTasks(ctx, &conversationSyncV2RetryStatusStore{RetryStore: r.store, runtime: r}, r.retryWake, c.runConversationSyncV2Retry)
 	}()
 	return nil
 }
@@ -57,13 +57,14 @@ func (c *Conversation) persistConversationSyncV2Pending(ctx context.Context, res
 	if err != nil {
 		return err
 	}
+	c.syncV2.retryMu.Lock()
+	defer c.syncV2.retryMu.Unlock()
 	for _, job := range jobs {
 		if err = c.syncV2.store.PutConversationSyncV2Retry(ctx, job); err != nil {
 			return err
 		}
+		c.syncV2.pendingRetries.Store(true)
 	}
-	c.syncV2.retryMu.Lock()
-	defer c.syncV2.retryMu.Unlock()
 	if c.syncV2.retryWake != nil {
 		select {
 		case c.syncV2.retryWake <- struct{}{}:
@@ -178,4 +179,20 @@ func (c *Conversation) runConversationSyncV2Retry(ctx context.Context, job *mode
 		return syncv2.ErrStatePending
 	}
 	return nil
+}
+
+// Observe the durable queue on its worker, never in the nonblocking status API.
+type conversationSyncV2RetryStatusStore struct {
+	syncv2.RetryStore
+	runtime *conversationSyncV2Runtime
+}
+
+func (s *conversationSyncV2RetryStatusStore) NextConversationSyncV2Retry(ctx context.Context) (*model_struct.LocalConversationSyncV2Retry, error) {
+	s.runtime.retryMu.Lock()
+	defer s.runtime.retryMu.Unlock()
+	job, err := s.RetryStore.NextConversationSyncV2Retry(ctx)
+	if err == nil {
+		s.runtime.pendingRetries.Store(job != nil)
+	}
+	return job, err
 }

@@ -56,6 +56,7 @@ type conversationSyncV2Store interface {
 }
 
 type conversationSyncV2Runtime struct {
+	pendingRetries     atomic.Bool
 	client             *syncv2.Client
 	store              conversationSyncV2Store
 	mode               atomic.Int32

@@ -4,10 +4,78 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 )
+
+func TestSyncV2RetryOrderedLookupAfterMigration(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			d, err := NewDataBase(ctx, "9007199254740993", dir, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = d.Close(ctx) }()
+			jobs := make([]*model_struct.LocalConversationSyncV2Retry, 0, 1001)
+			for i := 999; i >= 0; i-- {
+				jobs = append(jobs, &model_struct.LocalConversationSyncV2Retry{TaskID: fmt.Sprintf("task-%04d", i), Kind: "reconcile", Payload: `{}`, DueAt: 100, Revision: 1})
+			}
+			jobs = append(jobs, &model_struct.LocalConversationSyncV2Retry{TaskID: "earliest", Kind: "push", Payload: `{}`, DueAt: 50, Revision: 1})
+			if err = d.conn.CreateInBatches(jobs, 100).Error; err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				if err = d.conn.Exec("DROP INDEX IF EXISTS idx_sync_v2_retry_order").Error; err != nil {
+					t.Fatal(err)
+				}
+				if err = d.Close(ctx); err != nil {
+					t.Fatal(err)
+				}
+				d, err = NewDataBase(ctx, "9007199254740993", dir, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var plan []struct{ Detail string }
+			if err = d.conn.Raw("EXPLAIN QUERY PLAN SELECT * FROM local_conversation_sync_v2_retries ORDER BY due_at ASC, task_id ASC LIMIT 1").Scan(&plan).Error; err != nil {
+				t.Fatal(err)
+			}
+			indexed := false
+			for _, step := range plan {
+				if strings.Contains(step.Detail, "TEMP B-TREE") {
+					t.Fatalf("retry lookup sorts the queue: %s", step.Detail)
+				}
+				indexed = indexed || strings.Contains(step.Detail, "USING INDEX")
+			}
+			if !indexed {
+				t.Fatalf("retry lookup does not use an ordered index: %+v", plan)
+			}
+			first, err := d.NextConversationSyncV2Retry(ctx)
+			if err != nil || first == nil || first.TaskID != "earliest" {
+				t.Fatalf("deadline order changed: %+v %v", first, err)
+			}
+			if err = d.AcknowledgeConversationSyncV2Retry(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			next, err := d.NextConversationSyncV2Retry(ctx)
+			if err != nil || next == nil || next.TaskID != "task-0000" {
+				t.Fatalf("tie order changed: %+v %v", next, err)
+			}
+			if err = d.RescheduleConversationSyncV2Retry(ctx, next, 200); err != nil {
+				t.Fatal(err)
+			}
+			next, err = d.NextConversationSyncV2Retry(ctx)
+			if err != nil || next == nil || next.TaskID != "task-0001" {
+				t.Fatalf("reschedule order changed: %+v %v", next, err)
+			}
+		})
+	}
+}
 
 func TestSyncV2RetrySurvivesRestartAndOldAcknowledgement(t *testing.T) {
 	ctx := context.Background()

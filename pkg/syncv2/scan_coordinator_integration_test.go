@@ -188,3 +188,132 @@ func TestScanCapabilityDowngradeRebuildsInsteadOfResumingPartialSnapshot(t *test
 		t.Fatalf("err=%v snapshots=%d metadata=%d", err, snapshots, metadata)
 	}
 }
+func TestScanUnknownNotificationsPersistBeforeForeground(t *testing.T) {
+	ctx := ccontext.WithInfo(context.Background(), &ccontext.GlobalConfig{UserID: "u"})
+	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(ctx)
+	selfKnown := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data any
+		switch r.URL.Path {
+		case "/conversation/sync_capabilities":
+			data = &pb.Capabilities{ConversationSyncV2: true, PolicyVersion: syncv2.PolicyVersion, MaxBatchSize: 100, MaxPageSize: 100, MaxRequestBytes: 65536, SnapshotTTLSeconds: 600, ProgressiveScan: true, MaxScanPageSize: 100, IncrementalRecovery: true, IncrementalRecoveryVersion: syncv2.RecoveryVersion, SyncDomainID: "domain", MaxChangePageSize: 100}
+		case "/conversation/sync_scan":
+			var q pb.ScanRequest
+			json.NewDecoder(r.Body).Decode(&q)
+			p := &pb.ScanResponse{Scope: q.Scope, Live: true, PolicyVersion: syncv2.PolicyVersion, VersionID: "version", Version: 1, ExpiresAt: time.Now().Add(time.Hour).Unix(), BaselineCursor: "base-" + q.Scope, IncludeSelf: q.Scope == "notifications" && q.Cursor == ""}
+			if q.Cursor == "" {
+				p.Cursor = "next-" + q.Scope
+				p.HasMore = true
+				if q.Scope == "chat" || q.Scope == "notifications" {
+					p.ConversationIDs = []string{"si_u_v"}
+					p.Scanned = 1
+				}
+			}
+			data = p
+		case "/msg/sync_seqs_v2":
+			var q pb.StateRequest
+			json.NewDecoder(r.Body).Decode(&q)
+			p := &pb.StateResponse{}
+			for _, id := range q.ConversationIDs {
+				state := &pb.State{ConversationID: id, Known: true, StateToken: "state"}
+				if q.Notifications {
+					state.ConversationID = "n_u_v"
+					state.Known = false
+				} else {
+					state.Conversation = &conversation.Conversation{OwnerUserID: "u", ConversationID: id, UserID: "v", ConversationType: 1}
+				}
+				p.States = append(p.States, state)
+			}
+			if q.IncludeSelf {
+				p.States = []*pb.State{{ConversationID: "n_u_u", Known: selfKnown, StateToken: "state", MinSeq: 0, MaxSeq: 0}}
+			}
+			data = p
+		case "/conversation/sync_changes_v2":
+			var q pb.ChangeRequest
+			json.NewDecoder(r.Body).Decode(&q)
+			data = &pb.ChangeResponse{NextCursor: "done-" + q.Cursor, UntilCursor: "until", CaughtUp: true, SyncDomainID: "domain"}
+		default:
+			t.Errorf("unexpected route %s", r.URL.Path)
+			w.WriteHeader(500)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"errCode": 0, "data": data})
+	}))
+	defer server.Close()
+	client := syncv2.NewClient(server.URL, "", server.Client())
+	interrupted := errors.New("interrupt after first pages")
+	persistFailure := errors.New("retry storage failed")
+	failPersist := true
+	hooks := syncv2.CoordinatorHooks{
+		PersistPending: func(ctx context.Context, result *syncv2.SyncResult) error {
+			if failPersist {
+				return persistFailure
+			}
+			jobs, err := syncv2.PendingRetryTasks(result, time.Now().UnixMilli())
+			if err != nil {
+				return err
+			}
+			for _, job := range jobs {
+				if err := database.PutConversationSyncV2Retry(ctx, job); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		PrepareRelated: func(context.Context) error { return nil },
+		ReadMetadata: func(context.Context, uint64, string) (*conversation.GetIncrementalConversationResp, error) {
+			t.Error("unexpected metadata read")
+			return nil, nil
+		},
+		Commit:         func(context.Context, *model_struct.LocalConversationSyncV2Stream, []*sdkws.MsgData) error { return nil },
+		Publish:        func(context.Context, *model_struct.LocalConversationSyncV2, func(int, int)) error { return nil },
+		PrepareInitial: func(context.Context, *syncv2.Round) error { return nil },
+		Background:     func(context.Context) error { return interrupted },
+	}
+	_, err = client.Synchronize(ctx, "self-pending", "u", database, hooks)
+	if !errors.Is(err, syncv2.ErrCatchupPending) {
+		t.Fatalf("unknown self notifications bypassed: %v", err)
+	}
+	selfKnown = true
+	_, err = client.Synchronize(ctx, "persist-failure", "u", database, hooks)
+	if !errors.Is(err, persistFailure) {
+		t.Fatalf("missing persistence failure: %v", err)
+	}
+	failed, err := database.GetConversationSyncV2(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.ScanTask.Notifications.Cursor != "" || failed.ScanTask.Notifications.Page == nil || failed.ScanTask.InitialReady {
+		t.Fatal("advanced before pending work persisted")
+	}
+	failPersist = false
+	_, err = client.Synchronize(ctx, "op", "u", database, hooks)
+	if !errors.Is(err, interrupted) {
+		t.Fatalf("expected interruption, got %v", err)
+	}
+	cp, err := database.GetConversationSyncV2(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp.ScanTask == nil || !cp.ScanTask.InitialReady || cp.ScanTask.Chat.Cursor != "next-chat" {
+		t.Fatalf("checkpoint not persisted: %+v", cp.ScanTask)
+	}
+
+	job, err := database.NextConversationSyncV2Retry(ctx)
+	if err != nil || job == nil || job.TaskID != "reconcile:n_u_v" {
+		t.Fatalf("unknown notification not durably queued: job=%v err=%v", job, err)
+	}
+	hooks.Background = func(context.Context) error { return nil }
+	result, err := client.Synchronize(ctx, "resume", "u", database, hooks)
+	if err != nil || result.Checkpoint.ScanTask != nil {
+		t.Fatalf("scan blocked by pending notification: %v", err)
+	}
+	job, err = database.NextConversationSyncV2Retry(ctx)
+	if err != nil || job == nil {
+		t.Fatal("pending work lost at scan completion")
+	}
+}

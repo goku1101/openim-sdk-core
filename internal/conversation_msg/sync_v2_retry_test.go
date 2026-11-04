@@ -90,6 +90,9 @@ func TestSyncV2RetryWorkerResumesDurableUnknownAndStopsUnavailable(t *testing.T)
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
+			if !c.GetConversationSyncState().PendingRetries {
+				t.Fatal("pending queue hidden from status")
+			}
 			cancel()
 			c.WaitConversationSyncV2Retries()
 			<-done
@@ -110,7 +113,7 @@ func TestSyncV2RetryWorkerResumesDurableUnknownAndStopsUnavailable(t *testing.T)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if job == nil {
+				if job == nil && !c.GetConversationSyncState().PendingRetries {
 					break
 				}
 				if time.Now().After(deadline) {
