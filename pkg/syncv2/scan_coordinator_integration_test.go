@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -189,13 +190,20 @@ func TestScanCapabilityDowngradeRebuildsInsteadOfResumingPartialSnapshot(t *test
 	}
 }
 func TestScanUnknownNotificationsPersistBeforeForeground(t *testing.T) {
+	for _, selfKnown := range []bool{true, false} {
+		t.Run(fmt.Sprintf("selfKnown=%v", selfKnown), func(t *testing.T) {
+			testScanUnknownNotificationsPersistBeforeForeground(t, selfKnown)
+		})
+	}
+}
+
+func testScanUnknownNotificationsPersistBeforeForeground(t *testing.T, selfKnown bool) {
 	ctx := ccontext.WithInfo(context.Background(), &ccontext.GlobalConfig{UserID: "u"})
 	database, err := db.NewDataBase(ctx, "u", t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close(ctx)
-	selfKnown := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var data any
 		switch r.URL.Path {
@@ -274,11 +282,6 @@ func TestScanUnknownNotificationsPersistBeforeForeground(t *testing.T) {
 		PrepareInitial: func(context.Context, *syncv2.Round) error { return nil },
 		Background:     func(context.Context) error { return interrupted },
 	}
-	_, err = client.Synchronize(ctx, "self-pending", "u", database, hooks)
-	if !errors.Is(err, syncv2.ErrCatchupPending) {
-		t.Fatalf("unknown self notifications bypassed: %v", err)
-	}
-	selfKnown = true
 	_, err = client.Synchronize(ctx, "persist-failure", "u", database, hooks)
 	if !errors.Is(err, persistFailure) {
 		t.Fatalf("missing persistence failure: %v", err)
@@ -287,7 +290,7 @@ func TestScanUnknownNotificationsPersistBeforeForeground(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed.ScanTask.Notifications.Cursor != "" || failed.ScanTask.Notifications.Page == nil || failed.ScanTask.InitialReady {
+	if failed.ScanTask.Notifications.Cursor != "" || failed.ScanTask.InitialReady || !selfKnown && failed.ScanTask.SelfDone || selfKnown && failed.ScanTask.Notifications.Page == nil {
 		t.Fatal("advanced before pending work persisted")
 	}
 	failPersist = false
@@ -304,8 +307,18 @@ func TestScanUnknownNotificationsPersistBeforeForeground(t *testing.T) {
 	}
 
 	job, err := database.NextConversationSyncV2Retry(ctx)
-	if err != nil || job == nil || job.TaskID != "reconcile:n_u_v" {
+	expectedJob := "reconcile:n_u_v"
+	if !selfKnown {
+		expectedJob = "reconcile:n_u_u"
+	}
+	if err != nil || job == nil || job.TaskID != expectedJob {
 		t.Fatalf("unknown notification not durably queued: job=%v err=%v", job, err)
+	}
+	if !selfKnown {
+		var request pb.PullRequest
+		if err = json.Unmarshal([]byte(job.Payload), &request); err != nil || !request.Self || !request.Notifications || request.ConversationID != "" || request.UserID != "u" {
+			t.Fatalf("self retry identity lost: %+v %v", request, err)
+		}
 	}
 	hooks.Background = func(context.Context) error { return nil }
 	result, err := client.Synchronize(ctx, "resume", "u", database, hooks)

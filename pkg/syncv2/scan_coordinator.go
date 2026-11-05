@@ -71,8 +71,15 @@ func (c *Client) synchronizeScan(ctx context.Context, op, user string, store Coo
 		if err != nil {
 			return nil, err
 		}
-		if len(streams.PendingIDs) > 0 || len(streams.UnavailableIDs) > 0 {
+		if len(streams.UnavailableIDs) > 0 {
 			return nil, ErrCatchupPending
+		}
+		// The self stream has no parent in the scan directory. Preserve its
+		// explicit identity in the retry plan before advancing the scan task.
+		retryCheckpoint := *cp
+		retryCheckpoint.IncludeSelf = true
+		if err = persistPendingBeforeCursor(ctx, &SyncResult{Enabled: true, Capabilities: caps, Checkpoint: &retryCheckpoint, Notifications: streams}, hooks); err != nil {
+			return nil, err
 		}
 		task.SelfDone = true
 		if err = save(); err != nil {
